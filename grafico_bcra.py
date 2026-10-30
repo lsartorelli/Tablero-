@@ -464,7 +464,7 @@ header select option{color:#111}
 .status{margin-top:12px}.status b{color:var(--ink)}
 select,button{font:500 14px Archivo,sans-serif;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 12px;cursor:pointer}
 :focus-visible{outline:2px solid var(--cur);outline-offset:2px}
-.ind{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:14px 0 0}
+.ind{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin:14px 0 0}
 @media (max-width:700px){.ind{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .ind>div{--a:var(--cur);background:linear-gradient(180deg,color-mix(in srgb,var(--a) 14%,var(--panel)),var(--panel) 70%);
   border:1px solid color-mix(in srgb,var(--a) 35%,var(--line));border-top:4px solid var(--a);border-radius:12px;padding:12px 14px}
@@ -738,6 +738,16 @@ s.onchange=e=>{sel=e.target.value;render();};
 const ultimo=D.compras[D.compras.length-1].fecha;
 document.getElementById("status").innerHTML=`Datos oficiales hasta el <b>${dmy(D.ultimoOficial)}</b>${ultimo!==D.ultimoOficial?`, con provisorios hasta el <b>${dmy(ultimo)}</b>`:""}. Generado el ${D.generado}.`;
 
+function comprasCards(){
+  const C=D.compras||[]; if(!C.length) return "";
+  const u=C[C.length-1], a=C.length>1?C[C.length-2]:null, mes=u.fecha.slice(0,7);
+  const delMes=C.filter(x=>x.fecha.startsWith(mes)), tot=delMes.reduce((t,x)=>t+x.valor,0);
+  const M=["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"][+mes.slice(5)-1];
+  let pill="";
+  if(a){const d=u.valor-a.valor; pill=Math.abs(d)<0.05?`<span class="pill">Igual que el ${dmy(a.fecha).slice(0,5)}</span>`:`<span class="pill ${d>0?"good":"bad"}">${d>0?"▲":"▼"} ${fmt(Math.abs(d),1)} M vs ${dmy(a.fecha).slice(0,5)}</span>`;}
+  return `<div style="--a:var(--cur)"><div class="k">Compra BCRA del día (USD)</div><div class="v ${u.valor<0?"down":""}">${fmt(u.valor,1)} M</div><div class="d">Rueda ${delMes.length} · ${dmy(u.fecha).slice(0,5)}${u.prov?" (provisorio)":""}</div>${pill}</div>`+
+    `<div style="--a:var(--cur)"><div class="k">Compras de ${M} (USD)</div><div class="v ${tot<0?"down":""}">${fmt(tot,1)} M</div><div class="d">${delMes.length} ruedas · prom. ${fmt(tot/delMes.length,1)} M</div></div>`;
+}
 function inflCards(){
   const F=D.inflacion||{}, M=F.mensual||[];
   if(!M.length) return "";
@@ -781,7 +791,7 @@ function pintarUltimos(){
       d=x===0?`<span class="pill">Sin cambios vs ${dmy(a.fecha).slice(0,5)}</span>`
         :`<span class="pill ${c}">${x>0?"▲":"▼"} ${fmt(Math.abs(x),dec)} ${unidad} vs ${dmy(a.fecha).slice(0,5)}</span>`;}
     return `<div style="--a:var(${acc})"><div class="k">${tit}</div><div class="v">${f(u.valor)}</div><div class="d">Al ${dmy(u.fecha).slice(0,5)}${u.prov?" (provisorio)":""}</div>${d}</div>`;};
-  document.getElementById("ind").innerHTML=
+  document.getElementById("ind").innerHTML=comprasCards()+
     card("Reservas brutas (USD)",I.reservas,v=>`${fmt(v)} M`,"M",0,"--res",true)+
     card("Riesgo país",I.riesgo,v=>`${fmt(v)} pb`,"pb",0,"--risk",false)+
     card("Dólar minorista",I.minorista,v=>`$ ${fmt(v,2)}`,"$",2,"--fx",null)+
@@ -1080,6 +1090,7 @@ document.addEventListener("keydown",e=>{ if(e.target.tagName==="SELECT"||e.targe
   const ult=a=>a&&a.length?a[a.length-1]:null, pre=a=>a&&a.length>1?a[a.length-2]:null;
   const chg=(u,p,dec,suf="")=>{if(!u||!p) return ""; const d=u.valor-p.valor; return `<span class="${d>0?"up":d<0?"down":""}">${d>0?"+":""}${fmt(d,dec)}${suf}</span>`;};
   const add=(n,a,dec)=>{const u=ult(a); if(u) it.push(`<span class="t"><b>${n}</b>${fmt(u.valor,dec)} ${chg(u,pre(a),dec)}</span>`);};
+  {const C=D.compras||[]; const u=C[C.length-1]; if(u) it.push(`<span class="t"><b>BCRA COMPRA</b><span class="${u.valor>0?"up":u.valor<0?"down":""}">${u.valor>0?"+":""}${fmt(u.valor,1)} M</span> ${dmy(u.fecha).slice(0,5)}${u.prov?"P":""}</span>`);}
   add("RES",I.reservas,0); add("EMBI",I.riesgo,0); add("A3500",X.mayorista,2); add("MINOR",I.minorista,2); add("TAMAR",I.tamar,2); add("BADLAR",I.badlar,2);
   const B=X.brechas||{}; const cc=ult(B.ccl), mp=ult(B.mep), bl=ult(B.blue);
   if(mp) it.push(`<span class="t"><b>MEP</b>${fmt(mp.precio,2)}</span>`); if(cc) it.push(`<span class="t"><b>CCL</b>${fmt(cc.precio,2)}</span>`); if(bl) it.push(`<span class="t"><b>BLUE</b>${fmt(bl.precio,2)}</span>`);
