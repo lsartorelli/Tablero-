@@ -188,6 +188,9 @@ def get_bytes(url):
         raise
 
 
+BRASIL = {}  # tipo de cambio real bilateral con Brasil (ITCRB), lo completa itcrm_mensual()
+
+
 def itcrm_mensual():
     """Lee la hoja de promedios mensuales del Excel del BCRA sin librerías externas."""
     import io, re as _re, zipfile
@@ -203,6 +206,8 @@ def itcrm_mensual():
             f = dt.date(1899, 12, 30) + dt.timedelta(days=int(float(celdas["A"])))
             if f.year >= 1997:
                 out[f.strftime("%Y-%m")] = float(celdas["B"])
+                if celdas.get("C"):
+                    BRASIL[f.strftime("%Y-%m")] = float(celdas["C"])
         except (KeyError, ValueError):
             pass
     return out
@@ -333,6 +338,73 @@ def personas_humanas(hoy):
         with open(PH_ARCHIVO, "w", encoding="utf-8") as f:
             json.dump(dict(sorted(datos.items())), f, ensure_ascii=False, indent=1)
     return sorted(datos.items())
+
+
+# ---------- Semáforo de actividad ----------
+# (grupo, nombre, fuente, id, desestacionalizada, deflactar por IPC)
+SEMAFORO = [
+    ("Actividad", "Actividad económica (EMAE)", "ds", "143.3_NO_PR_2004_A_31", True, False),
+    ("Actividad", "Producción industrial (IPI)", "ds", "453.1_SERIE_DESEADA_0_0_24_58", True, False),
+    ("Actividad", "Construcción (ISAC)", "ds", "33.2_ISAC_NIVELRAL_0_M_18_63", False, False),
+    ("Actividad", "Despachos de cemento", "ds", "33.4_ISAC_CEMENAND_0_0_21_24", False, False),
+    ("Industria", "Producción de autos", "ds", "453.2_VEHICULOS_RES_0_0_21_54", False, False),
+    ("Industria", "Industria siderúrgica (acero)", "ds", "453.2_INDUSTRIA_ICA_0_0_21_100", False, False),
+    ("Industria", "Molienda de oleaginosas", "ds", "453.2_MOLIENDA_OSAS_0_0_20_8", False, False),
+    ("Industria", "Alimentos y bebidas", "ds", "453.2_ALIMENTOS_DAS_0_0_17_18", False, False),
+    ("Consumo", "Confianza del consumidor (UTDT)", "ds", "380.3_ICC_NACIONNAL_0_T_12", True, False),
+    ("Consumo", "Recaudación DGI (real)", "ds", "172.3_SOTAL_DDGI_M_0_0_12", False, True),
+    ("Crédito", "Préstamos en $ al sector privado (real)", "bcra", [117], True, True),
+    ("Crédito", "Préstamos al consumo (real)", "bcra", [114, 115], True, True),
+    ("Crédito", "Préstamos comerciales (real)", "bcra", [110, 111], True, True),
+    ("Sector externo", "Exportaciones FOB", "ds", "75.3_IETG_0_M_31", False, False),
+    ("Sector externo", "Importaciones CIF", "ds", "76.3_ITG_0_M_17", False, False),
+    ("Empleo", "Empleo privado formal (SIPA)", "ds", "152.1_TL_SIN_EST_2009_M_13", True, False),
+]
+
+
+def semaforo(hoy, infl_mensual):
+    desde = f"{hoy.year - 3}-01-01"
+    ids = [x[3] for x in SEMAFORO if x[2] == "ds"]
+    j = get_json(SERIES_URL.format(ids=",".join(ids + ["148.3_INIVELNAL_DICI_M_26"])) + f"&start_date={desde}")
+    cols = {m["field"]["id"]: i for i, m in enumerate(j["meta"]) if "field" in m}
+    serie_ds = {sid: {r[0][:7]: r[cols[sid]] for r in j["data"] if r[cols[sid]] is not None} for sid in ids}
+    ipc = {r[0][:7]: r[cols["148.3_INIVELNAL_DICI_M_26"]] for r in j["data"] if r[cols["148.3_INIVELNAL_DICI_M_26"]]}
+    for x in infl_mensual:  # extiende el IPC con los meses que datos.gob.ar todavía no cargó
+        if x["mes"] not in ipc and _mes_ant(x["mes"]) in ipc:
+            ipc[x["mes"]] = ipc[_mes_ant(x["mes"])] * (1 + x["valor"] / 100)
+    out = []
+    for grupo, nombre, fuente, sid, sa, real in SEMAFORO:
+        try:
+            if fuente == "ds":
+                s_ = serie_ds.get(sid, {})
+            else:  # stock diario de préstamos -> promedio mensual, solo meses completos
+                tot = {}
+                for var in sid:
+                    pm = promedio_mensual((x["fecha"], x["valor"]) for x in serie(var, desde))
+                    for k, v in pm.items():
+                        tot[k] = tot.get(k, 0) + v
+                s_ = {k: v for k, v in tot.items() if k < hoy.strftime("%Y-%m")}
+            if real:
+                s_ = {k: v / ipc[k] for k, v in s_.items() if k in ipc}
+            ks = sorted(s_)
+            if len(ks) < 15:
+                continue
+            v = [s_[k] for k in ks]
+            prom = lambda a: sum(a) / len(a)
+            u = ks[-1]
+            ia_k = f"{int(u[:4]) - 1}{u[4:]}"
+            ia = (s_[u] / s_[ia_k] - 1) * 100 if ia_k in s_ else None
+            ult3, ant3 = ks[-3:], [f"{int(k[:4]) - 1}{k[4:]}" for k in ks[-3:]]
+            ia3 = (prom([s_[k] for k in ult3]) / prom([s_[k] for k in ant3]) - 1) * 100 if all(k in s_ for k in ant3) else None
+            fila = {"grupo": grupo, "nombre": nombre, "mes": u, "sa": sa, "ia": ia, "ia3": ia3}
+            if sa:
+                fila.update({"mm": (v[-1] / v[-2] - 1) * 100, "tt": (prom(v[-3:]) / prom(v[-6:-3]) - 1) * 100,
+                             "ud": (v[-1] / prom(v[-4:-1]) - 1) * 100})
+            fila["sem"] = fila.get("ud") if sa else ia3
+            out.append(fila)
+        except Exception as e:
+            aviso(f"semáforo: no se pudo calcular {nombre} ({e})")
+    return out
 
 
 def dia_habil_siguiente(d):
@@ -691,6 +763,26 @@ def main():
                 cc = None
             serie_tcr.append([m, round(of, 1), round(cc, 1) if cc else None])
         historicos["tcr"] = {"base": base, "serie": serie_tcr}
+        # Dólar MEP real ajustado por el tipo de cambio real bilateral con Brasil
+        try:
+            mep_m = promedio_mensual((x["fecha"], float(x["venta"])) for x in get_json(DOLARES_URL.format(casa="bolsa")) if x.get("venta"))
+            base_b = max(k for k in BRASIL if k in a_m)
+            fb = a_m[base_b] / BRASIL[base_b]
+            sb = []
+            for m in sorted(k for k in BRASIL if k >= "2001-12"):
+                of = BRASIL[m] * fb
+                if m in mep_m and m in a_m:
+                    v = of * mep_m[m] / a_m[m]
+                elif m in ccl_m and m in a_m:  # antes de 2018 no hay serie MEP: se usa el CCL, muy parecido
+                    v = of * ccl_m[m] / a_m[m]
+                elif m < "2011-11":
+                    v = of
+                else:
+                    v = None
+                sb.append([m, round(v, 1) if v else None])
+            historicos["mep_brasil"] = {"base": base_b, "serie": sb}
+        except Exception as e:
+            aviso(f"no se pudo armar el MEP real contra Brasil ({e})")
     except Exception as e:
         aviso(f"no se pudo armar el dólar ajustado por ITCRM ({e})")
     try:
@@ -744,10 +836,44 @@ def main():
         historicos["pobreza"] = pre + pob
     except Exception as e:
         aviso(f"no se pudo traer la serie de pobreza ({e})")
+    try:  # cobros de servicios en el mercado de cambios (balance cambiario del BCRA), suma móvil 12 meses
+        ids_s = ["185.1_COBRO_SERVTES_0_M_22", "185.1_COBRO_SERVROS_0_M_36", "185.1_COBRO_OTRORTE_0_M_32", "185.1_COBRO_SERVJES_0_M_30",
+                 "185.1_COBRO_SERVION_0_M_28", "185.1_COBRO_SERVROS_0_M_23", "185.1_COBROS_SERROS_0_M_28", "185.1_COBR_SERV_ECT_0_M_37",
+                 "185.1_COBRO_SERVNES_0_M_50", "185.1_COBRO_SERVICA_0_M_39", "185.1_COBRO_SERVCOS_0_M_52", "185.1_COBRO_SERVVOS_0_M_49",
+                 "185.1_COBRO_SERVRNO_0_M_24", "185.1_COBRO_SERVIVO_0_M_39", "185.1_COBRO_SERVCIO_0_M_41", "185.1_OTROS_COBRIOS_0_M_22"]
+        jj = get_json(SERIES_URL.format(ids=",".join(ids_s)))
+        i_tur = [m.get("field", {}).get("id") for m in jj["meta"]].index("185.1_COBRO_SERVJES_0_M_30")
+        mens = [(r[0][:7], sum(x for x in r[1:] if x), r[i_tur]) for r in jj["data"]]
+        mens = [x for x in mens if x[2] is not None]
+        serv = []
+        for i in range(11, len(mens)):
+            serv.append([mens[i][0], round(sum(x[1] for x in mens[i - 11:i + 1])), round(sum(x[2] for x in mens[i - 11:i + 1]))])
+        historicos["servicios"] = serv
+    except Exception as e:
+        aviso(f"no se pudieron traer los cobros de servicios ({e})")
+    try:  # índice de salarios del INDEC
+        ids_w = {"total": "149.1_TL_INDIIOS_OCTU_0_21", "registrado": "149.1_TL_REGIADO_OCTU_0_16",
+                 "privado": "149.1_SOR_PRIADO_OCTU_0_25", "publico": "149.1_SOR_PUBICO_OCTU_0_14", "noreg": "149.1_SOR_PRIADO_OCTU_0_28"}
+        jw = get_json(SERIES_URL.format(ids=",".join(list(ids_w.values()) + ["148.3_INIVELNAL_DICI_M_26"])))
+        cw = {m.get("field", {}).get("id"): i for i, m in enumerate(jw["meta"])}
+        sal = {k: {r[0][:7]: r[cw[i]] for r in jw["data"] if r[cw[i]] is not None} for k, i in ids_w.items()}
+        ipc_w = {r[0][:7]: r[cw["148.3_INIVELNAL_DICI_M_26"]] for r in jw["data"] if r[cw["148.3_INIVELNAL_DICI_M_26"]]}
+        for x in inflacion.get("mensual", []):
+            if x["mes"] not in ipc_w and _mes_ant(x["mes"]) in ipc_w:
+                ipc_w[x["mes"]] = ipc_w[_mes_ant(x["mes"])] * (1 + x["valor"] / 100)
+        historicos["salarios"] = {"nominal": sal, "ipc": {k: v for k, v in ipc_w.items() if k >= "2016-10"}}
+    except Exception as e:
+        aviso(f"no se pudo traer el índice de salarios ({e})")
     try:
         historicos["personas"] = personas_humanas(hoy)
     except Exception as e:
         aviso(f"no se pudo armar la serie de compras de personas humanas ({e})")
+
+    try:
+        sem = semaforo(hoy, inflacion.get("mensual", []))
+    except Exception as e:
+        sem = []
+        aviso(f"no se pudo armar el semáforo de actividad ({e})")
 
     alimentos = {}
     try:
@@ -791,6 +917,7 @@ def main():
         "alimentos": alimentos,
         "historicos": historicos,
         "escenarios": escenarios,
+        "semaforo": sem,
         "avisos": AVISOS,
         "inflacion": inflacion,
         "bonos": bonos,
@@ -986,8 +1113,11 @@ tbody tr:nth-child(even) td{background:#0d0d0d}
 footer{color:#555;font-size:10.5px;margin-top:6px}
 select.nm{background:#000!important;color:var(--amb)!important;border:1px solid #444!important;border-radius:0!important;font:600 11px "IBM Plex Mono",monospace!important}
 [data-sec].oculto{display:none!important}
+.sem td:nth-child(2){color:#999;text-align:center}
+.sem .dot{display:inline-block;width:14px;height:14px;border-radius:50%}
+.sem td.sv{text-align:center}
 .gobs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin:0 10px 8px}
-@media (max-width:800px){.gobs{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:800px){.gobs{grid-template-columns:repeat(2,minmax(0,1fr))!important}}
 .gobs>div{background:#0d0d0d;border:1px solid var(--line);border-top:3px solid var(--c);padding:8px 10px}
 .gobs .nm{color:var(--c);font-weight:700;font-size:12px;letter-spacing:.04em}
 .gobs .fe{color:#777;font-size:10.5px}
@@ -1021,6 +1151,7 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <button type="button" data-tab="bonos" aria-pressed="false"><b>6)</b>BONOS</button>
     <button type="button" data-tab="adrs" aria-pressed="false"><b>7)</b>ADRS</button>
     <button type="button" data-tab="ipc" aria-pressed="false"><b>8)</b>IPC</button>
+    <button type="button" data-tab="actividad" aria-pressed="false"><b>9)</b>ACTIVIDAD</button>
   </nav>
   <div class="tick" id="tick"></div>
   <p class="status" id="status"></p>
@@ -1069,6 +1200,22 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <p class="n" id="ncm" style="margin:8px 0 0"></p>
   </section>
 
+  <section data-sec="actividad" class="panel" id="pserv">
+    <div class="phead"><h2>Ingreso de dólares por servicios y turismo (suma de 12 meses)</h2>
+      <div class="seg" role="group" aria-label="Serie">
+        <button type="button" data-sv="t" aria-pressed="true">Turismo y viajes</button>
+        <button type="button" data-sv="s" aria-pressed="false">Total servicios</button>
+      </div></div>
+    <div class="chartbox" style="height:320px"><canvas id="c19" aria-label="Cobros de servicios y de turismo en el mercado de cambios, suma de 12 meses"></canvas></div>
+    <p class="n" id="nserv" style="margin:8px 0 0"></p>
+  </section>
+
+  <section data-sec="actividad" class="panel" id="psem">
+    <div class="phead"><h2>Semáforo de actividad económica</h2></div>
+    <div class="tablewrap"><table class="mkt sem" id="tsem"></table></div>
+    <p class="n" id="nsem" style="margin:8px 0 0"></p>
+  </section>
+
   <section data-sec="ipc" class="panel" id="pinf">
     <div class="phead"><h2>Inflación mensual (INDEC)</h2><span class="n" id="infsub"></span></div>
     <div class="chartbox" style="height:300px"><canvas id="c8" aria-label="Inflación mensual del INDEC de los últimos 24 meses, con la interanual"></canvas></div>
@@ -1113,6 +1260,12 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <p class="n" id="ntcr" style="margin:8px 0 0"></p>
   </section>
 
+  <section data-sec="fx" class="panel" id="pmepbr">
+    <div class="phead"><h2 id="mepbrt">Dólar MEP real ajustado por tipo de cambio real con Brasil</h2></div>
+    <div class="chartbox" style="height:360px"><canvas id="c17" aria-label="Dólar MEP ajustado por el tipo de cambio real bilateral con Brasil desde 2001"></canvas></div>
+    <p class="n" id="nmepbr" style="margin:8px 0 0"></p>
+  </section>
+
   <section data-sec="adrs" class="panel" id="padr">
     <div class="phead"><h2>ADRs argentinos en Nueva York</h2></div>
     <div class="tablewrap"><table class="mkt" id="tadr"></table></div>
@@ -1125,16 +1278,15 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <p class="n" id="nmerv" style="margin:8px 0 0"></p>
   </section>
 
-  <section data-sec="ipc" class="panel" id="alim">
-    <div class="phead"><h2 id="t4">Precios de alimentos ajustados por inflación</h2>
-      <div class="seg" role="group" aria-label="Valores" id="realnom">
-        <button type="button" data-v="real" aria-pressed="true">Ajustado</button>
-        <button type="button" data-v="nominal" aria-pressed="false">Nominal</button>
+  <section data-sec="ipc" class="panel" id="psal">
+    <div class="phead"><h2 id="salt">Índice de salarios (INDEC)</h2>
+      <div class="seg" role="group" aria-label="Vista">
+        <button type="button" data-sal="mm" aria-pressed="true">Mensual</button>
+        <button type="button" data-sal="real" aria-pressed="false">Salario real</button>
       </div></div>
-    <div class="chips" id="chips" role="group" aria-label="Producto"></div>
-    <div class="fstats" id="fstats"></div>
-    <div class="chartbox" style="height:320px"><canvas id="c4"></canvas></div>
-    <p class="n" id="fnote" style="margin:8px 0 0"></p>
+    <div class="gobs" id="salcards" style="grid-template-columns:repeat(5,minmax(0,1fr))"></div>
+    <div class="chartbox" style="height:320px"><canvas id="c18" aria-label="Índice de salarios: variación mensual y salario real"></canvas></div>
+    <p class="n" id="nsal" style="margin:8px 0 0"></p>
   </section>
 
   <section data-sec="ipc" class="panel" id="ppob">
@@ -1145,7 +1297,7 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
   </section>
 
   <section data-sec="ipc" class="panel" id="canasta">
-    <div class="phead"><h2>Canasta: precios reales en índice (base 100)</h2>
+    <div class="phead"><h2>Precios de alimentos: canasta en términos reales (base 100)</h2>
       <div class="seg" role="group" aria-label="Desde">
         <button type="button" data-cb="2023-12" aria-pressed="true">Desde dic-23</button>
         <button type="button" data-cb="12" aria-pressed="false">12 meses</button>
@@ -1292,6 +1444,7 @@ bandas();
 // Alimentos
 let c4, prod=null, vista="real";
 function alimentos(){
+  if(!document.getElementById("alim")) return;  // panel retirado: los datos los usa la canasta
   const A=D.alimentos, panel=document.getElementById("alim");
   if(!A||!A.productos||!Object.keys(A.productos).length){panel.style.display="none";return;}
   const keys=Object.keys(A.productos); if(!prod) prod=keys[0];
@@ -1345,11 +1498,11 @@ function canasta(){
     options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
       plugins:{legend:{labels:{color:m,boxWidth:12,font,filter:it=>it.text!=="Base 100"}},tooltip:{callbacks:{label:it=>it.raw==null||it.dataset.label==="Base 100"?null:`${it.dataset.label}: ${fmt(it.raw,1)}`}}},
       scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:12,maxRotation:0}},y:{grid:{color:g},ticks:{color:m,font}}}}});
-  const filas=series.map(sr=>({n:sr.nombre,v:sr.data[sr.data.length-1]})).sort((a,b)=>b.v-a.v);
+  const filas=series.map(sr=>{const S=A.productos[sr.k].serie, u=S[S.length-1]; return {n:sr.nombre,v:sr.data[sr.data.length-1],p:u.nominal,f:u.fecha};}).sort((a,b)=>b.v-a.v);
   const pc=v=>{const x=v-100;return `<td class="pc ${x>0?"up":x<0?"down":""}">${x>0?"+":""}${fmt(x,1)} %</td>`;};
-  document.getElementById("tcan").innerHTML=`<thead><tr><th>Producto</th><th>Índice</th><th>Variación real</th></tr></thead><tbody>`+
-    filas.map(f=>`<tr><td class="t">${f.n}</td><td>${fmt(f.v,1)}</td>${pc(f.v)}</tr>`).join("")+
-    `<tr style="font-weight:700"><td class="t" style="color:#fff">PROMEDIO CANASTA</td><td>${fmt(prom[prom.length-1],1)}</td>${pc(prom[prom.length-1])}</tr></tbody>`;
+  document.getElementById("tcan").innerHTML=`<thead><tr><th>Producto</th><th>Precio ${filas.length?mesCorto(filas[0].f.slice(0,7)):""}</th><th>Índice</th><th>Variación real</th></tr></thead><tbody>`+
+    filas.map(f=>`<tr><td class="t">${f.n}</td><td>$ ${fmt(f.p,0)}</td><td>${fmt(f.v,1)}</td>${pc(f.v)}</tr>`).join("")+
+    `<tr style="font-weight:700"><td class="t" style="color:#fff">PROMEDIO CANASTA</td><td></td><td>${fmt(prom[prom.length-1],1)}</td>${pc(prom[prom.length-1])}</tr></tbody>`;
   document.getElementById("ncan").textContent=`Precio de cada producto ajustado por inflación, igual a 100 en ${mesCorto(base)}. Arriba de 100: se encareció más que la inflación; abajo: se abarató en términos reales. Último dato: ${mesCorto(L[L.length-1])}. Fuente: INDEC, precios promedio en GBA.`;
 }
 document.querySelectorAll("[data-cb]").forEach(b=>b.onclick=()=>{canDesde=b.dataset.cb;document.querySelectorAll("[data-cb]").forEach(x=>x.setAttribute("aria-pressed",x===b));canasta();});
@@ -1479,6 +1632,99 @@ function historicos(){
   } else document.getElementById("pmerv").style.display="none";
 }
 historicos();
+
+// MEP real contra Brasil
+let c17;
+function mepBrasil(){
+  const M=(D.historicos||{}).mep_brasil, panel=document.getElementById("pmepbr");
+  if(!M||!M.serie.length){panel.style.display="none";return;}
+  const S=M.serie, L=S.map(x=>x[0]), V=S.map(x=>x[1]), m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  const ok=S.filter(x=>x[1]!=null), mx=ok.reduce((a,b)=>b[1]>a[1]?b:a), mn=ok.reduce((a,b)=>b[1]<a[1]?b:a), u=ok[ok.length-1], prom=ok.reduce((a,x)=>a+x[1],0)/ok.length;
+  c17?.destroy();
+  c17=new Chart(document.getElementById("c17"),{type:"line",data:{labels:L.map(mesCorto),datasets:[
+    {label:"MEP real (Brasil)",data:V,borderColor:"#3a8ee6",borderWidth:2,pointRadius:0,spanGaps:false,tension:.1},
+    {label:"Promedio",data:L.map(()=>prom),borderColor:"#ffb000",borderDash:[5,4],borderWidth:1.3,pointRadius:0}]},
+    options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
+      plugins:{legend:{labels:{color:m,boxWidth:12,font}},lineasVert:{marcas:PRESIDENTES.map(([k,n])=>[L.indexOf(k),n])},
+        tooltip:{callbacks:{label:it=>it.raw==null?null:`${it.dataset.label}: $ ${fmt(it.raw,0)}`}}},
+      scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:14,maxRotation:0}},y:{grid:{color:g},ticks:{color:m,font,callback:v=>"$ "+fmt(v)}}}},plugins:[lineasVert]});
+  document.getElementById("mepbrt").textContent=`Dólar MEP real ajustado por tipo de cambio real con Brasil (en pesos de ${mesCorto(M.base)})`;
+  document.getElementById("nmepbr").textContent=`Cuánto valdría hoy el MEP de cada mes si se mantuviera el tipo de cambio real con Brasil. Último: $ ${fmt(u[1],0)} (${mesCorto(u[0])}), ${fmt((u[1]/prom-1)*100,0)} % contra el promedio ($ ${fmt(prom,0)}). Máximo: $ ${fmt(mx[1],0)} (${mesCorto(mx[0])}); mínimo: $ ${fmt(mn[1],0)} (${mesCorto(mn[0])}). Antes de 2018 se usa el CCL (casi igual al MEP) y antes del cepo de 2011, el oficial; nov-2011 a dic-2012 sin datos. Fuentes: BCRA (ITCRB Brasil, A3500), ArgentinaDatos.`;
+}
+
+// Salarios
+let c18, salVista="mm";
+function salarios(){
+  const W=(D.historicos||{}).salarios, panel=document.getElementById("psal");
+  if(!W){panel.style.display="none";return;}
+  const N=W.nominal, I=W.ipc, m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  const SEC=[["total","Total","#ffffff"],["registrado","Registrado","#3a8ee6"],["privado","Privado registrado","#00d26a"],["publico","Público","#b388ff"],["noreg","Privado no registrado","#ffb000"]];
+  const ks=Object.keys(N.total).sort(), u=ks[ks.length-1], an=u.slice(0,4);
+  const pct=(a,b)=>a!=null&&b?(a/b-1)*100:null, ant=k=>{let[y,mm]=k.split("-").map(Number);mm--;if(!mm){mm=12;y--;}return y+"-"+String(mm).padStart(2,"0");};
+  const ia=k=>`${+k.slice(0,4)-1}${k.slice(4)}`;
+  document.getElementById("salcards").innerHTML=SEC.map(([k,n,c])=>{const S=N[k]; const uk=Object.keys(S).sort().pop();
+    const vm=pct(S[uk],S[ant(uk)]), vi=pct(S[uk],S[ia(uk)]), va=pct(S[uk],S[`${+uk.slice(0,4)-1}-12`]);
+    const real=I[uk]&&I[ia(uk)]?((S[uk]/I[uk])/(S[ia(uk)]/I[ia(uk)])-1)*100:null;
+    return `<div style="--c:${c}"><div class="nm">${n.toUpperCase()}</div><div class="fe">${mesCorto(uk)}</div><div class="pc">${vm!=null?fmt(vm,1)+" %":"s/d"}</div>
+      <div class="ab">v.ia. ${fmt(vi,1)} % · v.a. ${fmt(va,1)} %</div><div class="rg">Real i.a.: <b style="color:${real>=0?"var(--good)":"var(--bad)"}">${real>0?"+":""}${fmt(real,1)} %</b></div></div>`;}).join("");
+  c18?.destroy();
+  if(salVista==="mm"){
+    const L=ks.slice(-12);
+    const ser=(k,c)=>({label:SEC.find(x=>x[0]===k)[1],data:L.map(x=>pct(N[k][x],N[k][ant(x)])),backgroundColor:c,borderRadius:0});
+    const ipcm=L.map(x=>pct(I[x],I[ant(x)]));
+    c18=new Chart(document.getElementById("c18"),{data:{labels:L.map(mesCorto),datasets:[
+      {type:"bar",...ser("total","#8899aa")},{type:"bar",...ser("privado","#00d26a")},
+      {type:"line",label:"Inflación",data:ipcm,borderColor:"#ff3b3b",backgroundColor:"#ff3b3b",borderWidth:2,pointRadius:3,tension:.2}]},
+      options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
+        plugins:{legend:{labels:{color:m,boxWidth:12,font}},tooltip:{callbacks:{label:it=>it.raw==null?null:`${it.dataset.label}: ${fmt(it.raw,1)} %`}}},
+        scales:{x:{grid:{display:false},ticks:{color:m,font}},y:{beginAtZero:true,grid:{color:g},ticks:{color:m,font,callback:v=>v+" %"}}}}});
+    document.getElementById("salt").textContent="Índice de salarios (INDEC): variación mensual";
+  } else {
+    const base="2023-11", L=ks.filter(x=>x>=base&&I[x]);
+    const ds=SEC.filter(([k])=>N[k][base]&&k!=="noreg").map(([k,n,c])=>({label:n,data:L.map(x=>N[k][x]&&I[x]?(N[k][x]/I[x])/(N[k][base]/I[base])*100:null),borderColor:c,borderWidth:k==="total"?3:1.8,pointRadius:0,tension:.2}));
+    c18=new Chart(document.getElementById("c18"),{type:"line",data:{labels:L.map(mesCorto),datasets:[...ds,{label:"Base 100",data:L.map(()=>100),borderColor:"#555",borderWidth:1,pointRadius:0}]},
+      options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
+        plugins:{legend:{labels:{color:m,boxWidth:12,font,filter:it=>it.text!=="Base 100"}},tooltip:{callbacks:{label:it=>it.raw==null||it.dataset.label==="Base 100"?null:`${it.dataset.label}: ${fmt(it.raw,1)}`}}},
+        scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:12,maxRotation:0}},y:{grid:{color:g},ticks:{color:m,font}}}}});
+    document.getElementById("salt").textContent="Salario real (deflactado por IPC), noviembre 2023 = 100";
+  }
+  document.getElementById("nsal").textContent=`v.m.: variación mensual; v.ia.: interanual; v.a.: acumulada en el año; real i.a.: variación interanual descontada la inflación. El INDEC publica el índice con unos dos meses de rezago, y el dato del sector no registrado tiene cinco meses de rezago adicional (por eso no se incluye en el gráfico de salario real y su variación real está sobrestimada). Fuente: INDEC vía datos.gob.ar.`;
+}
+document.querySelectorAll("[data-sal]").forEach(b=>b.onclick=()=>{salVista=b.dataset.sal;document.querySelectorAll("[data-sal]").forEach(x=>x.setAttribute("aria-pressed",x===b));salarios();});
+
+// Servicios y turismo
+let c19, svVista="t";
+function servicios(){
+  const S=(D.historicos||{}).servicios||[], panel=document.getElementById("pserv");
+  if(!S.length){panel.style.display="none";return;}
+  const desde=svVista==="t"?"2017-01":"2004-01", P=S.filter(x=>x[0]>=desde), i=svVista==="t"?2:1, col=svVista==="t"?"#ffb000":"#ff9a3c";
+  const m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  c19?.destroy();
+  c19=new Chart(document.getElementById("c19"),{type:"line",data:{labels:P.map(x=>mesCorto(x[0])),datasets:[{label:svVista==="t"?"Turismo y viajes":"Total servicios",data:P.map(x=>x[i]),borderColor:col,backgroundColor:col+"22",fill:true,borderWidth:2.5,pointRadius:0,tension:.2}]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:it=>`USD ${fmt(it.raw,0)} M en 12 meses`}}},
+      scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:12,maxRotation:0}},y:{beginAtZero:true,grid:{color:g},ticks:{color:m,font,callback:v=>"USD "+fmt(v)+" M"}}}}});
+  const u=P[P.length-1], a=P.find(x=>x[0]===`${+u[0].slice(0,4)-1}${u[0].slice(4)}`);
+  document.getElementById("nserv").textContent=`Último: USD ${fmt(u[i],0)} M en los 12 meses a ${mesCorto(u[0])}${a?`, ${fmt((u[i]/a[i]-1)*100,0)} % más que un año antes`:""}. Son los dólares que ingresan por el mercado de cambios por cada servicio (balance cambiario del BCRA), por eso pueden diferir de las estadísticas del INDEC. Fuente: BCRA vía datos.gob.ar.`;
+}
+document.querySelectorAll("[data-sv]").forEach(b=>b.onclick=()=>{svVista=b.dataset.sv;document.querySelectorAll("[data-sv]").forEach(x=>x.setAttribute("aria-pressed",x===b));servicios();});
+setTimeout(()=>{mepBrasil();salarios();servicios();},0);
+
+// Semáforo de actividad
+function semaforoTabla(){
+  const S=D.semaforo||[], t=document.getElementById("tsem");
+  if(!S.length){document.getElementById("psem").style.display="none";return;}
+  const MES=["ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"];
+  const m=k=>MES[+k.slice(5)-1]+"-"+k.slice(2,4);
+  const pc=v=>{if(v==null) return '<td class="pc">–</td>'; v=Math.round(v*10)/10||0; return `<td class="pc ${v>0?"up":v<0?"down":""}">${v>0?"+":""}${fmt(v,1)} %</td>`;};
+  const col=v=>v==null?"#555":v>1?"#00d26a":v<-1?"#ff3b3b":"#ffb000";
+  let g="", h=`<thead><tr><th>Indicador</th><th>Dato</th><th>m/m</th><th>t/t</th><th>UD vs trim. prev.</th><th>i.a.</th><th>i.a. 3 meses</th><th></th></tr></thead><tbody>`;
+  S.forEach(r=>{ if(r.grupo!==g){g=r.grupo; h+=`<tr class="grp"><td colspan="8">${g}</td></tr>`;}
+    h+=`<tr><td class="t">${r.nombre}${r.sa?"":" *"}</td><td>${m(r.mes)}</td>${pc(r.mm)}${pc(r.tt)}${pc(r.ud)}${pc(r.ia)}${pc(r.ia3)}<td class="sv"><span class="dot" style="background:${col(r.sem)}" title="${r.sem==null?"":fmt(r.sem,1)+" %"}"></span></td></tr>`;});
+  t.innerHTML=h+"</tbody>";
+  const v=S.filter(r=>r.sem!=null), ver=v.filter(r=>r.sem>1).length, roj=v.filter(r=>r.sem<-1).length;
+  document.getElementById("nsem").innerHTML=`<b style="color:#00d26a">${ver} en verde</b> · <b style="color:#ffb000">${v.length-ver-roj} en amarillo</b> · <b style="color:#ff3b3b">${roj} en rojo</b>. Series desestacionalizadas: m/m mensual, t/t último trimestre contra el anterior, UD vs trim. prev. último dato contra el promedio de los tres meses anteriores; el color sigue esta última. * Series sin desestacionalizar: solo se comparan contra el año anterior y el color sigue la variación interanual de los últimos tres meses. Verde: más de +1 %; rojo: menos de −1 %. Préstamos y recaudación deflactados por IPC. Fuentes: INDEC, UTDT, AFIP y BCRA vía datos.gob.ar y la API del BCRA.`;
+}
+semaforoTabla();
 
 // Reservas por gobierno
 const GOBIERNOS=[["CRISTINA KIRCHNER","2007-12-10","2015-12-09","#3a8ee6"],["MAURICIO MACRI","2015-12-10","2019-12-09","#ffb000"],
@@ -1700,7 +1946,7 @@ function render(){
 
 }
 document.querySelectorAll("[data-mode]").forEach(b=>b.onclick=()=>{mode=b.dataset.mode;document.querySelectorAll("[data-mode]").forEach(x=>x.setAttribute("aria-pressed",x===b));render();});
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();inflacion();});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();inflacion();});
 render();
 function avisos(){const A=D.avisos||[], el=document.getElementById("avisos"); el.innerHTML=A.length?`<section class="panel" style="border-color:var(--bad)"><div class="k" style="color:var(--bad)">Avisos de la última actualización</div><ul class="n" style="margin:6px 0 0;padding-left:18px">${A.map(a=>`<li>${a.replace(/</g,"&lt;")}</li>`).join("")}</ul></section>`:"";}
 avisos();
@@ -1730,7 +1976,7 @@ document.addEventListener("keydown",e=>{ if(e.target.tagName==="SELECT"||e.targe
 })();
 (function reloj(){const el=document.getElementById("clk"); const f=()=>{el.textContent=new Date().toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})+" ART";}; f(); setInterval(f,30000);})();
 // Redibuja cuando termina de cargar la tipografía, para que las etiquetas midan bien
-if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();inflacion();});
+if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();inflacion();});
 // Recarga la página cada 10 minutos para tomar la última versión generada
 // Recarga salteando la caché del navegador (agrega ?t=… al link)
 const recargar=()=>location.replace(location.pathname+"?t="+Date.now()+location.hash);
