@@ -510,7 +510,7 @@ select,button{font:500 14px Archivo,sans-serif;color:var(--ink);background:var(-
 .mkt td.t{font-weight:700}
 .mkt td.nm{color:var(--muted)}
 .mkt td.pc{font-variant-numeric:tabular-nums;font-weight:600}
-@media (max-width:800px){.ind select.nm{font:600 13px Archivo,sans-serif;padding:1px 4px;border-radius:6px;margin:0 2px;background:var(--panel);color:var(--ink)}
+.ind select.nm{font:600 13px Archivo,sans-serif;padding:1px 4px;border-radius:6px;margin:0 2px;background:var(--panel);color:var(--ink)}
 .cmp{border-radius:14px;padding:16px 18px;margin:16px 0 0;border:1px solid color-mix(in srgb,var(--good) 40%,var(--line));
   background:linear-gradient(120deg,color-mix(in srgb,var(--good) 16%,var(--panel)),var(--panel))}
 .cmp.neg{border-color:color-mix(in srgb,var(--bad) 40%,var(--line));background:linear-gradient(120deg,color-mix(in srgb,var(--bad) 16%,var(--panel)),var(--panel))}
