@@ -241,6 +241,97 @@ def promedio_mensual(puntos):
     return {k: sum(v) / len(v) for k, v in acc.items()}
 
 
+INDEC_PRECIOS_URL = "https://www.indec.gob.ar/ftp/cuadros/economia/sh_ipc_precios_promedio.xls"
+INDEC_NOMBRES = {"huevos de gallina": "huevos", "pollo entero": "pollo", "asado": "asado", "nalga": "nalga", "carne picada común": "picada"}
+
+
+def _mes_ant(k):
+    y, m = map(int, k.split("-"))
+    m -= 1
+    if m < 1:
+        m, y = 12, y - 1
+    return f"{y}-{m:02d}"
+
+
+def precios_indec():
+    """Precios promedio en GBA desde el Excel del INDEC (hoja GBA). Requiere xlrd."""
+    import xlrd
+    hoja = xlrd.open_workbook(file_contents=get_bytes(INDEC_PRECIOS_URL)).sheet_by_name("GBA")
+    meses_es = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+    fila_mes = next(r for r in range(10) if str(hoja.cell_value(r, 2)).strip().lower() in meses_es)
+    y, m = 2016, meses_es.index(str(hoja.cell_value(fila_mes, 2)).strip().lower()) + 1
+    for r in range(fila_mes):  # el año inicial figura en la fila de arriba ("Año 2016")
+        t = str(hoja.cell_value(r, 2))
+        if "20" in t:
+            y = int("".join(ch for ch in t if ch.isdigit())[:4])
+    cols = []
+    for c in range(2, hoja.ncols):
+        if str(hoja.cell_value(fila_mes, c)).strip():
+            cols.append((c, f"{y}-{m:02d}-01"))
+            m += 1
+            if m > 12:
+                m, y = 1, y + 1
+    out = {}
+    for r in range(fila_mes + 1, hoja.nrows):
+        clave = INDEC_NOMBRES.get(str(hoja.cell_value(r, 0)).strip().lower())
+        if clave:
+            out[clave] = {f: float(hoja.cell_value(r, c)) for c, f in cols if isinstance(hoja.cell_value(r, c), float)}
+    return out
+
+
+# ---------- Compras netas de moneda extranjera de "Personas humanas" (balance cambiario mensual del BCRA) ----------
+PH_ARCHIVO = os.path.join(BASE, "personas_humanas.json")
+PH_URL = "https://www.bcra.gob.ar/archivos/Pdfs/PublicacionesEstadisticas/informes/informe-mercado-cambios-balance-cambiario-{ym}.pdf"
+PH_SEED = {  # USD millones netos, del resumen ejecutivo de cada informe (abr-25 sin dato comparable)
+    "2025-01": 917, "2025-02": 769, "2025-03": 570, "2025-04": None, "2025-05": 3846, "2025-06": 4357, "2025-07": 5644,
+    "2025-08": 3450, "2025-09": 6857, "2025-10": 5068, "2025-11": 1596, "2025-12": 2793, "2026-01": 3146,
+    "2026-02": 2552, "2026-03": 2470, "2026-04": 3199, "2026-05": 2667, "2026-06": 2821, "2026-07": 4124,
+    "2026-08": 3366, "2026-09": 3410}
+
+
+def personas_humanas(hoy):
+    """Serie mensual; busca los informes nuevos (PDF) y guarda lo que encuentra. Requiere pypdf para meses nuevos."""
+    try:
+        with open(PH_ARCHIVO, encoding="utf-8") as f:
+            datos = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        datos = {}
+    for k, v in PH_SEED.items():
+        datos.setdefault(k, v)
+    k = max(datos)
+    tope = _mes_ant(hoy.strftime("%Y-%m"))
+    nuevos = False
+    while k < tope:
+        k = _mes_sig(k)
+        try:
+            pdf = get_bytes(PH_URL.format(ym=k))
+        except Exception:
+            break  # todavía no se publicó
+        if not pdf.startswith(b"%PDF"):
+            break
+        try:
+            import io, re as _re
+            from pypdf import PdfReader
+        except ImportError:
+            aviso("para leer el informe cambiario nuevo instalá pypdf: pip install pypdf")
+            break
+        r = PdfReader(io.BytesIO(pdf))
+        t = " ".join((pg.extract_text() or "") for pg in r.pages[2:6])
+        t = _re.sub(r"\s+", " ", t)
+        t = _re.sub(r"(\d) (\d)", r"\1\2", t).replace("US D", "USD")
+        i = t.lower().find("personas humanas")
+        m = _re.search(r"USD ([\d\.]+) millones", t[i:i + 500]) if i >= 0 else None
+        if not m:
+            aviso(f"no se encontró el dato de personas humanas en el informe de {k}")
+            break
+        datos[k] = float(m.group(1).replace(".", ""))
+        nuevos = True
+    if nuevos:
+        with open(PH_ARCHIVO, "w", encoding="utf-8") as f:
+            json.dump(dict(sorted(datos.items())), f, ensure_ascii=False, indent=1)
+    return sorted(datos.items())
+
+
 def dia_habil_siguiente(d):
     d += dt.timedelta(days=1)
     while d.weekday() >= 5:
@@ -613,15 +704,46 @@ def main():
     except Exception as e:
         aviso(f"no se pudo armar el Merval ajustado por inflación ({e})")
 
+    try:  # reservas diarias desde dic-2007, por gobierno
+        hist_r = {}
+        for ini, fin in (("2007-12-01", "2013-12-31"), ("2014-01-01", "2019-12-31"), ("2020-01-01", hoy.isoformat())):
+            for x in get_json(f"https://api.bcra.gob.ar/estadisticas/v4.0/Monetarias/{VAR_RESERVAS}?desde={ini}&hasta={fin}&limit=3000")["results"][0]["detalle"]:
+                hist_r[x["fecha"]] = float(x["valor"])
+        for x in mezclar(api_r, "reservas", SEED + manuales):  # suma los provisorios recientes
+            hist_r.setdefault(x["fecha"], x["valor"])
+        fs = sorted(hist_r)
+        historicos["reservas"] = {"f": fs, "v": [round(hist_r[f] / 1000, 2) for f in fs]}
+    except Exception as e:
+        aviso(f"no se pudo armar la serie histórica de reservas ({e})")
+    try:
+        historicos["personas"] = personas_humanas(hoy)
+    except Exception as e:
+        aviso(f"no se pudo armar la serie de compras de personas humanas ({e})")
+
     alimentos = {}
     try:
         ids = [IPC_GBA] + [x[2] for x in ALIMENTOS]
         filas = get_json(SERIES_URL.format(ids=",".join(ids)))["data"]
         ipc = {r[0]: r[1] for r in filas if r[1]}
-        base_mes = max(ipc)
-        for i, (clave, nombre, _) in enumerate(ALIMENTOS, start=2):
-            pts = [{"fecha": r[0], "nominal": r[i], "real": r[i] * ipc[base_mes] / ipc[r[0]]}
-                   for r in filas if r[i] is not None and r[0] in ipc]
+        precios = {clave: {r[0]: r[i] for r in filas if r[i] is not None} for i, (clave, _, _) in enumerate(ALIMENTOS, start=2)}
+        # El Excel del INDEC sale el mismo día del dato de inflación; datos.gob.ar tarda semanas más
+        try:
+            for clave, ser_i in precios_indec().items():
+                precios.setdefault(clave, {}).update(ser_i)
+        except ImportError:
+            aviso("para tener el último mes de precios de alimentos instalá xlrd: pip install xlrd")
+        except Exception as e:
+            aviso(f"no se pudo leer el Excel de precios del INDEC ({e})")
+        # Meses sin IPC GBA publicado en datos.gob.ar: se extiende con la inflación nacional del INDEC
+        for x in inflacion.get("mensual", []):
+            f = x["mes"] + "-01"
+            ant = max((k for k in ipc if k < f), default=None)
+            if f not in ipc and ant and ant[:7] == _mes_ant(x["mes"]):
+                ipc[f] = ipc[ant] * (1 + x["valor"] / 100)
+        base_mes = max(f for f in ipc if any(f in s_ for s_ in precios.values()))
+        for clave, nombre, _ in ALIMENTOS:
+            pts = [{"fecha": f, "nominal": v, "real": v * ipc[base_mes] / ipc[f]}
+                   for f, v in sorted(precios.get(clave, {}).items()) if f in ipc and f <= base_mes]
             if pts:
                 alimentos[clave] = {"nombre": nombre, "serie": pts}
         alimentos = {"base": base_mes, "productos": alimentos}
@@ -835,6 +957,14 @@ tbody tr:nth-child(even) td{background:#0d0d0d}
 footer{color:#555;font-size:10.5px;margin-top:6px}
 select.nm{background:#000!important;color:var(--amb)!important;border:1px solid #444!important;border-radius:0!important;font:600 11px "IBM Plex Mono",monospace!important}
 [data-sec].oculto{display:none!important}
+.gobs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin:0 10px 8px}
+@media (max-width:800px){.gobs{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.gobs>div{background:#0d0d0d;border:1px solid var(--line);border-top:3px solid var(--c);padding:8px 10px}
+.gobs .nm{color:var(--c);font-weight:700;font-size:12px;letter-spacing:.04em}
+.gobs .fe{color:#777;font-size:10.5px}
+.gobs .pc{font:700 24px "IBM Plex Mono",monospace;color:var(--c);margin-top:4px}
+.gobs .ab{color:#fff;font-weight:600;font-size:12px}
+.gobs .rg{color:#888;font-size:11px}
 .ley{display:inline-block;border:1px solid #555;color:#aaa;font-size:10.5px;padding:0 4px}.ley.ny{border-color:var(--amb);color:var(--amb)}
 #tbon td.tir{color:var(--amb);font-weight:600}
 #tbon tr[data-bono]{cursor:pointer}#tbon tr.sel td{background:#1a1300!important}
@@ -934,6 +1064,19 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
       <p class="n" id="nrn" style="margin:8px 0 0"></p>
     </section>
   </div>
+
+  <section data-sec="reservas" class="panel" id="pgob">
+    <div class="phead"><h2>Reservas internacionales del BCRA por gobierno</h2></div>
+    <div class="gobs" id="gobs"></div>
+    <div class="chartbox" style="height:420px"><canvas id="c14" aria-label="Reservas internacionales diarias del BCRA desde diciembre de 2007, coloreadas por gobierno"></canvas></div>
+    <p class="n" id="ngob" style="margin:8px 0 0"></p>
+  </section>
+
+  <section data-sec="fx compras" class="panel" id="pph">
+    <div class="phead"><h2>Compras netas de dólares de personas humanas</h2></div>
+    <div class="chartbox" style="height:320px"><canvas id="c13" aria-label="Compras netas mensuales de moneda extranjera de las personas humanas, en millones de dólares"></canvas></div>
+    <p class="n" id="nph" style="margin:8px 0 0"></p>
+  </section>
 
   <section data-sec="fx" class="panel" id="ptcr">
     <div class="phead"><h2 id="tcrt">Dólar oficial y CCL ajustados por ITCRM</h2></div>
@@ -1256,6 +1399,69 @@ function historicos(){
 }
 historicos();
 
+// Reservas por gobierno
+const GOBIERNOS=[["CRISTINA KIRCHNER","2007-12-10","2015-12-09","#3a8ee6"],["MAURICIO MACRI","2015-12-10","2019-12-09","#ffb000"],
+  ["ALBERTO FERNÁNDEZ","2019-12-10","2023-12-09","#00d26a"],["JAVIER MILEI","2023-12-10","2099-12-31","#b388ff"]];
+const fondosGob={id:"fondosGob",beforeDatasetsDraw(ch,_,o){const {ctx,chartArea:a,scales:{x}}=ch; const R=o.rangos||[];
+  ctx.save(); R.forEach(([i0,i1,col,nom])=>{const x0=Math.max(x.getPixelForValue(i0),a.left),x1=Math.min(x.getPixelForValue(i1),a.right);
+    ctx.fillStyle=col+"14"; ctx.fillRect(x0,a.top,x1-x0,a.bottom-a.top); ctx.fillStyle=col; ctx.font='bold 11px "IBM Plex Mono",monospace'; ctx.textAlign="center";
+    ctx.fillText(nom,(x0+x1)/2,a.top+14);}); ctx.restore();},
+  afterDatasetsDraw(ch,_,o){const {ctx,scales:{x,y},chartArea:a}=ch; ctx.save(); ctx.font='10.5px "IBM Plex Mono",monospace';
+    (o.notas||[]).forEach(([i,v,txt,col,arriba])=>{const px=x.getPixelForValue(i),py=y.getPixelForValue(v), ty=arriba?py-18:py+24;
+      ctx.strokeStyle="#888"; ctx.beginPath(); ctx.moveTo(px,py); ctx.lineTo(px,ty+(arriba?4:-12)); ctx.stroke();
+      ctx.fillStyle=col; ctx.beginPath(); ctx.arc(px,py,3,0,7); ctx.fill();
+      ctx.fillStyle="#ddd"; const w=ctx.measureText(txt).width; let tx=Math.min(Math.max(px-w/2,a.left+2),a.right-w-2); ctx.textAlign="left"; ctx.fillText(txt,tx,ty);}); ctx.restore();}};
+let c14;
+function reservasGob(){
+  const R=(D.historicos||{}).reservas; const panel=document.getElementById("pgob");
+  if(!R||!R.f.length){panel.style.display="none";return;}
+  const F=R.f, V=R.v, m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  const MES=["ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"], mf=f=>MES[+f.slice(5,7)-1]+" "+f.slice(0,4);
+  const tarj=[], rangos=[], notas=[], ds=[];
+  GOBIERNOS.forEach(([nom,ini,fin,col],k)=>{
+    const idx=F.map((f,i)=>f>=ini&&f<=fin?i:-1).filter(i=>i>=0); if(!idx.length) return;
+    const i0=idx[0], i1=idx[idx.length-1], v0=V[i0], v1=V[i1], d=v1-v0, pc=(v1/v0-1)*100;
+    const enCurso=fin>"2090";
+    tarj.push(`<div style="--c:${col}"><div class="nm">${nom}</div><div class="fe">${dmy(F[i0])} – ${enCurso?"en curso (al "+dmy(F[i1])+")":dmy(F[i1])}</div>
+      <div class="pc">${pc>0?"+":"−"}${fmt(Math.abs(pc),0)} %</div><div class="ab">${d>0?"+":"−"}USD ${fmt(Math.abs(d),1)} mil M</div><div class="rg">${fmt(v0,1)} → ${fmt(v1,1)} mil M</div></div>`);
+    rangos.push([i0,i1,col,nom.split(" ").slice(-1)[0]==="KIRCHNER"?"CFK":nom.split(" ").slice(-1)[0]]);
+    let im=i0; idx.forEach(i=>{if(V[i]>V[im]) im=i;});
+    notas.push([im,V[im],`Máx. ${nom.split(" ").slice(-1)[0]==="KIRCHNER"?"CFK":nom.split(" ").slice(-1)[0][0]+nom.split(" ").slice(-1)[0].slice(1).toLowerCase()}: ${fmt(V[im],1)} (${mf(F[im])})`,col,true]);
+    ds.push({label:nom,data:V.map((v,i)=>i>=i0&&i<=i1?v:null),borderColor:col,borderWidth:1.5,pointRadius:0,spanGaps:false,tension:0});
+  });
+  let imin=0; V.forEach((v,i)=>{if(v<V[imin]) imin=i;});
+  notas.push([imin,V[imin],`Mín.: ${fmt(V[imin],1)} (${mf(F[imin])})`,"#ff3b3b",false]);
+  document.getElementById("gobs").innerHTML=tarj.join("");
+  c14?.destroy();
+  c14=new Chart(document.getElementById("c14"),{type:"line",data:{labels:F,datasets:ds},
+    options:{responsive:true,maintainAspectRatio:false,animation:false,interaction:{mode:"index",intersect:false},
+      plugins:{legend:{display:false},fondosGob:{rangos,notas},tooltip:{callbacks:{title:it=>dmy(F[it[0].dataIndex]),label:it=>it.raw==null?null:`${it.dataset.label}: USD ${fmt(it.raw,1)} mil M`}}},
+      scales:{x:{grid:{display:false},ticks:{color:m,font,maxRotation:0,autoSkip:false,callback:(v,i)=>{const f=F[i],p=F[i-1]; return (p&&f.slice(0,4)!==p.slice(0,4))?f.slice(0,4):null;}}},
+        y:{beginAtZero:true,suggestedMax:Math.ceil(Math.max(...V)*1.15/10)*10,grid:{color:g},ticks:{color:m,font},title:{display:true,text:"Miles de millones de USD",color:m,font}}}},plugins:[fondosGob]});
+  document.getElementById("ngob").textContent=`Reservas brutas diarias (${fmt(F.length,0)} observaciones desde ${dmy(F[0])}). La variación de cada gobierno compara el primer y el último dato de su mandato; el de Javier Milei llega al último dato disponible (${dmy(F[F.length-1])}). Fuente: BCRA, variable 1 de la API de estadísticas, más los provisorios cargados.`;
+}
+reservasGob();
+
+// Compras de personas humanas
+let c13;
+function personas(){
+  const P=(D.historicos||{}).personas||[];
+  if(!P.length){document.getElementById("pph").style.display="none";return;}
+  const m=css("--muted"),g=css("--line"),font={family:"IBM Plex Mono",size:11};
+  const L=P.map(x=>x[0]), v=P.map(x=>x[1]);
+  const idxCepo=L.indexOf("2025-04")>=0?L.indexOf("2025-04"):L.findIndex(k=>k>"2025-04");
+  c13?.destroy();
+  c13=new Chart(document.getElementById("c13"),{type:"bar",data:{labels:L.map(mesCorto),datasets:[{label:"USD millones",data:v,borderRadius:0,
+      backgroundColor:L.map(k=>k===L[L.length-1]?"#3a8ee6":"#ffb000")}]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},lineasVert:{marcas:[[idxCepo,"SALIDA DEL CEPO (14/4/25) · ABR-25 SIN DATO"]]},
+      tooltip:{callbacks:{label:it=>`USD ${fmt(it.raw,0)} M`}}},
+      scales:{x:{grid:{display:false},ticks:{color:m,font,maxRotation:0,autoSkip:true}},y:{beginAtZero:true,grid:{color:g},ticks:{color:m,font,callback:x=>fmt(x)+" M"}}}},plugins:[lineasVert]});
+  const ok=P.filter(x=>x[0]>="2025-05"&&x[1]!=null), tot=ok.reduce((a,x)=>a+x[1],0), u=P[P.length-1], prom=tot/ok.length;
+  const anio=u[0].slice(0,4), ytd=P.filter(x=>x[0].startsWith(anio)&&x[1]!=null).reduce((a,x)=>a+x[1],0);
+  document.getElementById("nph").textContent=`Último dato: ${mesCorto(u[0])} USD ${fmt(u[1],0)} M. En ${anio}: USD ${fmt(ytd,0)} M. Desde la salida del cepo (may-25): USD ${fmt(tot,0)} M, promedio USD ${fmt(prom,0)} M por mes. Incluye billetes, giros sin fines específicos y pagos con tarjeta en el exterior; antes de abril 2025, con cepo, eran casi solo consumos con tarjeta. Abril 2025 no tiene un dato comparable. Sale una vez por mes, a fin del mes siguiente. Fuente: BCRA, Informe de Evolución del Mercado de Cambios y Balance Cambiario.`;
+}
+personas();
+
 // Tablas de mercado
 function celda(v){
   if(v==null) return '<td class="pc">–</td>';
@@ -1384,7 +1590,7 @@ function render(){
 
 }
 document.querySelectorAll("[data-mode]").forEach(b=>b.onclick=()=>{mode=b.dataset.mode;document.querySelectorAll("[data-mode]").forEach(x=>x.setAttribute("aria-pressed",x===b));render();});
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();inflacion();});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();inflacion();});
 render();
 function avisos(){const A=D.avisos||[], el=document.getElementById("avisos"); el.innerHTML=A.length?`<section class="panel" style="border-color:var(--bad)"><div class="k" style="color:var(--bad)">Avisos de la última actualización</div><ul class="n" style="margin:6px 0 0;padding-left:18px">${A.map(a=>`<li>${a.replace(/</g,"&lt;")}</li>`).join("")}</ul></section>`:"";}
 avisos();
@@ -1414,7 +1620,7 @@ document.addEventListener("keydown",e=>{ if(e.target.tagName==="SELECT"||e.targe
 })();
 (function reloj(){const el=document.getElementById("clk"); const f=()=>{el.textContent=new Date().toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})+" ART";}; f(); setInterval(f,30000);})();
 // Redibuja cuando termina de cargar la tipografía, para que las etiquetas midan bien
-if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();inflacion();});
+if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();inflacion();});
 // Recarga la página cada 10 minutos para tomar la última versión generada
 // Recarga salteando la caché del navegador (agrega ?t=… al link)
 const recargar=()=>location.replace(location.pathname+"?t="+Date.now()+location.hash);
