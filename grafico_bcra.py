@@ -666,6 +666,9 @@ PLANTILLA = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>Tablero económico argentino</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
@@ -1413,7 +1416,16 @@ document.addEventListener("keydown",e=>{ if(e.target.tagName==="SELECT"||e.targe
 // Redibuja cuando termina de cargar la tipografía, para que las etiquetas midan bien
 if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();inflacion();});
 // Recarga la página cada 10 minutos para tomar la última versión generada
-setInterval(()=>{ if(!document.hidden) location.reload(); }, 10*60*1000);
+// Recarga salteando la caché del navegador (agrega ?t=… al link)
+const recargar=()=>location.replace(location.pathname+"?t="+Date.now()+location.hash);
+setInterval(()=>{ if(!document.hidden) recargar(); }, 10*60*1000);
+// Si hay una versión más nueva publicada, recarga sola al abrir o volver a la pestaña
+async function hayNueva(){
+  if(location.protocol==="file:") return;
+  try{ const r=await fetch(location.pathname+"?chk="+Date.now(),{cache:"no-store"}); const t=await r.text();
+    const m=t.match(/"generado":\s*"([^"]+)"/); if(m&&m[1]!==D.generado) recargar(); }catch(e){}
+}
+hayNueva(); document.addEventListener("visibilitychange",()=>{ if(!document.hidden) hayNueva(); });
 </script>
 </body>
 </html>"""
