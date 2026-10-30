@@ -1,0 +1,59 @@
+name: Actualizar tablero
+
+on:
+  schedule:
+    - cron: "*/15 12-22 * * 1-5"   # cada 15 min de lunes a viernes, de 9 a 20 h (Argentina)
+    - cron: "0 */3 * * *"          # el resto del tiempo, cada 3 horas
+  workflow_dispatch:                # botón "Run workflow", con carga opcional del dato del día
+    inputs:
+      fecha:
+        description: "Fecha del dato manual (AAAA-MM-DD). Vacío = no cargar"
+        required: false
+      compra:
+        description: "Compra del BCRA en USD M"
+        required: false
+      reservas:
+        description: "Reservas brutas en USD M (opcional)"
+        required: false
+      riesgo:
+        description: "Riesgo país en puntos (opcional)"
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tablero
+  cancel-in-progress: false
+
+jobs:
+  actualizar:
+    runs-on: ubuntu-latest
+    env:
+      TZ: America/Argentina/Buenos_Aires
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Generar tablero
+        run: |
+          ARGS="--no-abrir --salida docs/index.html"
+          if [ -n "${{ github.event.inputs.fecha }}" ] && [ -n "${{ github.event.inputs.compra }}" ]; then
+            ARGS="$ARGS --cargar ${{ github.event.inputs.fecha }} ${{ github.event.inputs.compra }}"
+            [ -n "${{ github.event.inputs.reservas }}" ] && ARGS="$ARGS --reservas ${{ github.event.inputs.reservas }}"
+          fi
+          [ -n "${{ github.event.inputs.riesgo }}" ] && ARGS="$ARGS --riesgo ${{ github.event.inputs.riesgo }}"
+          python grafico_bcra.py $ARGS
+
+      - name: Publicar cambios
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m "Actualización automática $(date '+%d/%m %H:%M')"
+          git pull --rebase
+          git push
