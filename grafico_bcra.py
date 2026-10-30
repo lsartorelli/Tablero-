@@ -13,7 +13,7 @@ Uso:
 
 Requiere solo Python 3.8+ (sin librerías externas).
 """
-import argparse, datetime as dt, json, os, ssl, sys, urllib.parse, urllib.request, urllib.error, webbrowser
+import argparse, datetime as dt, json, math, os, ssl, sys, urllib.parse, urllib.request, urllib.error, webbrowser
 
 API = "https://api.bcra.gob.ar/estadisticas/v4.0/Monetarias/{id}?desde={desde}&limit=3000"
 VAR_COMPRAS, VAR_RESERVAS = 78, 1
@@ -66,8 +66,115 @@ CNY_URL = "https://api.frankfurter.app/latest?from=USD&to=CNY"
 ORO_URL = "https://api.gold-api.com/price/XAU"
 HIST_BONO_URL = "https://data912.com/historical/bonds/{t}"
 SPARK_URL = "https://query1.finance.yahoo.com/v8/finance/spark?symbols={s}&range=ytd&interval=1d"
-BONOS = [("Bonares (ley local)", ["AO27", "AO28", "AO29", "AN29", "AL29", "AL30", "AL35", "AE38", "AL41"]),
-         ("Globales (ley NY)", ["GD29", "GD30", "GD35", "GD38", "GD41", "GD46"])]
+BONOS = [("Globales (ley Nueva York)", ["GD29", "GD30", "GD35", "GD38", "GD41", "GD46"]),
+         ("Bonares (ley argentina)", ["AL29", "AL30", "AL35", "AE38", "AL41"]),
+         ("Bonares 2026 (AO / AN)", ["AN29", "AO27", "AO28", "AO29"])]
+UST_URL = "https://query1.finance.yahoo.com/v8/finance/spark?symbols=%5EIRX,%5EFVX,%5ETNX,%5ETYX&range=5d&interval=1d"
+
+
+# ---------- Flujos de fondos de los bonos (por cada 100 nominales originales) ----------
+def _sumar_meses(d, n, dia):
+    import calendar
+    y = d.year + (d.month - 1 + n) // 12
+    m = (d.month - 1 + n) % 12 + 1
+    return dt.date(y, m, min(dia, calendar.monthrange(y, m)[1]))
+
+
+def _escalon(tramos):
+    """tramos: [(hasta_fecha, tasa_anual)] -> función tasa(fecha de pago)."""
+    def f(d):
+        for hasta, t in tramos:
+            if d <= hasta:
+                return t
+        return tramos[-1][1]
+    return f
+
+
+_D = dt.date
+_CUPONES = {
+    "29": _escalon([(_D(2099, 1, 1), 0.01)]),
+    "30": _escalon([(_D(2021, 7, 9), 0.00125), (_D(2023, 7, 9), 0.005), (_D(2027, 7, 9), 0.0075), (_D(2099, 1, 1), 0.0175)]),
+    "35": _escalon([(_D(2021, 7, 9), 0.00125), (_D(2022, 7, 9), 0.01125), (_D(2023, 7, 9), 0.015), (_D(2024, 7, 9), 0.03625),
+                    (_D(2027, 7, 9), 0.04125), (_D(2028, 7, 9), 0.0475), (_D(2099, 1, 1), 0.05)]),
+    "38": _escalon([(_D(2021, 7, 9), 0.00125), (_D(2022, 7, 9), 0.02), (_D(2023, 7, 9), 0.03875), (_D(2024, 7, 9), 0.0425), (_D(2099, 1, 1), 0.05)]),
+    "41": _escalon([(_D(2021, 7, 9), 0.00125), (_D(2022, 7, 9), 0.025), (_D(2029, 7, 9), 0.035), (_D(2099, 1, 1), 0.04875)]),
+    "46": _escalon([(_D(2021, 7, 9), 0.00125), (_D(2022, 7, 9), 0.01125), (_D(2023, 7, 9), 0.015), (_D(2024, 7, 9), 0.03625),
+                    (_D(2027, 7, 9), 0.04125), (_D(2028, 7, 9), 0.04375), (_D(2099, 1, 1), 0.05)]),
+}
+_AMORT = {  # (desde, hasta, % por cuota) en fechas 9-ene / 9-jul
+    "29": [(_D(2025, 1, 9), _D(2029, 7, 9), 10)],
+    "30": [(_D(2024, 7, 9), _D(2024, 7, 9), 4), (_D(2025, 1, 9), _D(2030, 7, 9), 8)],
+    "35": [(_D(2031, 1, 9), _D(2035, 7, 9), 10)],
+    "38": [(_D(2027, 7, 9), _D(2038, 1, 9), 100 / 22)],
+    "41": [(_D(2028, 1, 9), _D(2041, 7, 9), 100 / 28)],
+    "46": [(_D(2025, 1, 9), _D(2046, 7, 9), 100 / 44)],
+}
+_VTO = {"29": _D(2029, 7, 9), "30": _D(2030, 7, 9), "35": _D(2035, 7, 9), "38": _D(2038, 1, 9), "41": _D(2041, 7, 9), "46": _D(2046, 7, 9)}
+_NUEVOS = {"AO27": (_D(2027, 10, 29), 0.06, 1), "AO28": (_D(2028, 10, 31), 0.06, 1),
+           "AO29": (_D(2029, 10, 31), 0.06, 1), "AN29": (_D(2029, 11, 30), 0.065, 6)}  # vto, cupón, meses entre pagos
+
+
+def flujos_bono(t):
+    """Lista de (fecha, cupón, amortización, residual antes del pago)."""
+    if t in _NUEVOS:
+        vto, cup, meses = _NUEVOS[t]
+        fechas, d = [], vto
+        while d > _D(2025, 11, 1):
+            fechas.append(d)
+            d = _sumar_meses(d, -meses, vto.day)
+        return [(d, 100 * cup * meses / 12, 100 if d == vto else 0, 100.0) for d in sorted(fechas)]
+    k = t[2:4]
+    tasa, amort = _CUPONES[k], _AMORT[k]
+    out, res, d = [], 100.0, _D(2021, 1, 9)
+    while res > 1e-9 and d <= _VTO[k]:
+        a = sum(p for ini, fin, p in amort if ini <= d <= fin)
+        out.append((d, res * tasa(d) / 2, a, res))
+        res -= a
+        d = _D(d.year, 7, 9) if d.month == 1 else _D(d.year + 1, 1, 9)
+    return out
+
+
+def _d360(a, b):
+    return (b.year - a.year) * 360 + (b.month - a.month) * 30 + (min(b.day, 30) - min(a.day, 30))
+
+
+def metricas_bono(t, precio, liq):
+    """TIR efectiva anual, TNA 180/360, duration modificada, convexidad, valor técnico y paridad.
+    El precio de BYMA es precio sucio (incluye intereses corridos)."""
+    fl = flujos_bono(t)
+    fut = [f for f in fl if f[0] > liq]
+    pas = [f for f in fl if f[0] <= liq]
+    if not fut:
+        return None
+    res, prox = fut[0][3], fut[0][0]
+    ult = pas[-1][0] if pas else None
+    corrido = fut[0][1] * _d360(ult, liq) / max(_d360(ult, prox), 1) if ult else 0.0
+    vt = res + corrido
+    cfs = [((f[0] - liq).days / 365.0, f[1] + f[2]) for f in fut]
+    lo, hi = -0.5, 3.0
+    for _ in range(200):
+        y = (lo + hi) / 2
+        if sum(c / (1 + y) ** x for x, c in cfs) > precio:
+            lo = y
+        else:
+            hi = y
+    pv = sum(c / (1 + y) ** x for x, c in cfs)
+    mac = sum(x * c / (1 + y) ** x for x, c in cfs) / pv
+    conv = sum(x * (x + 1) * c / (1 + y) ** (x + 2) for x, c in cfs) / pv
+    cupon_hoy = (fut[0][1] / res * (12 / _NUEVOS[t][2]) if t in _NUEVOS else fut[0][1] / res * 2) * 100 if res else 0
+    vto = fl[-1][0]
+    return {"tir": y * 100, "tna": 2 * ((1 + y) ** 0.5 - 1) * 100, "md": mac / (1 + y), "conv": conv,
+            "vt": vt, "paridad": precio / vt * 100, "cupon": cupon_hoy, "vto": vto.isoformat(),
+            "flujos": [[f[0].isoformat(), round(f[1], 4), round(f[2], 4)] for f in fut]}
+
+
+def dia_habil_siguiente(d):
+    d += dt.timedelta(days=1)
+    while d.weekday() >= 5:
+        d += dt.timedelta(days=1)
+    return d
+
+
 ADRS = [("GGAL", "Grupo Galicia"), ("BMA", "Banco Macro"), ("BBAR", "BBVA Argentina"), ("SUPV", "Supervielle"),
         ("YPF", "YPF"), ("PAM", "Pampa Energía"), ("VIST", "Vista Energy"), ("TGS", "TGS"),
         ("CEPU", "Central Puerto"), ("EDN", "Edenor"), ("TEO", "Telecom"), ("LOMA", "Loma Negra"),
@@ -299,51 +406,57 @@ def main():
     except Exception as e:
         aviso(f"no se pudo traer el precio del oro ({e})")
 
-    # --- Bonos soberanos en USD MEP
+    # --- Bonos soberanos en USD MEP (con TIR, duration, paridad, spreads)
     bonos = []
     try:
         vivo = {x["symbol"]: x for x in get_json(BONOS_URL)}
+        liq = dia_habil_siguiente(hoy)  # liquidación T+1
+        ust = {}
         try:
-            with open(HIST_LOCAL, encoding="utf-8") as f:
-                local = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            local = {}
-        if hoy.weekday() < 5:  # guarda el precio del día de cada bono
-            for _, tks in BONOS:
-                for t in tks:
-                    v = vivo.get(t + "D")
-                    if v and v.get("c"):
-                        local.setdefault(t, {})[hoy.isoformat()] = float(v["c"])
-            with open(HIST_LOCAL, "w", encoding="utf-8") as f:
-                json.dump(local, f, ensure_ascii=False, indent=1)
-        inicio_anio = f"{hoy.year}-01-01"
+            u = get_json(UST_URL)
+            ust = {0.25: u["^IRX"]["close"][-1], 5: u["^FVX"]["close"][-1], 10: u["^TNX"]["close"][-1], 30: u["^TYX"]["close"][-1]}
+        except Exception as e:
+            aviso(f"no se pudo traer la curva del Tesoro de EE.UU. ({e})")
+
+        def ust_a(md):
+            if not ust:
+                return None
+            ks = sorted(ust)
+            if md <= ks[0]:
+                return ust[ks[0]]
+            for a_, b_ in zip(ks, ks[1:]):
+                if md <= b_:
+                    return ust[a_] + (ust[b_] - ust[a_]) * (md - a_) / (b_ - a_)
+            return ust[ks[-1]]
+
         for grupo, tickers in BONOS:
             filas_b = []
             for t in tickers:
-                try:
-                    try:
-                        hh = get_json(HIST_BONO_URL.format(t=t + "D"))
-                        h = [x for x in hh if isinstance(x, dict) and x.get("c")]
-                    except Exception:
-                        h = []
-                    if not h and local.get(t):  # sin histórico en data912: usar el que guarda el script
-                        h = [{"date": f, "c": c} for f, c in sorted(local[t].items())]
-                    v = vivo.get(t + "D")
-                    if not (v and v.get("c")) and not h:
-                        continue
-                    ult = float(v["c"]) if v and v.get("c") else h[-1]["c"]
-                    cierres = [x["c"] for x in h]
-                    if v and h and h[-1]["date"] == hoy.isoformat():
-                        cierres = cierres[:-1]  # el histórico ya trae hoy: comparar contra cierres anteriores
-                    ref = lambda n: cierres[-n] if len(cierres) >= n else None
-                    prev_anio = [x["c"] for x in h if x["date"] < inicio_anio]
-                    pc = lambda a: (ult / a - 1) * 100 if a else None
-                    filas_b.append({"t": t, "precio": ult,
-                                    "d1": float(v["pct_change"]) if v and v.get("pct_change") is not None else pc(ref(1)),
-                                    "d5": pc(ref(5)), "m1": pc(ref(21)), "ytd": pc(prev_anio[-1] if prev_anio else None)})
-                except Exception as e:
-                    aviso(f"sin datos para {t} ({e})")
+                v, va = vivo.get(t + "D"), vivo.get(t)
+                if not (v and v.get("c")):
+                    continue
+                px = float(v["c"])
+                m = metricas_bono(t, px, liq) or {}
+                fila = {"t": t, "ley": "NY" if t.startswith("GD") else "ARG", "precio": px,
+                        "bid": v.get("px_bid"), "ask": v.get("px_ask"), "d1": v.get("pct_change"),
+                        "vol": v.get("v"), "mep": (float(va["c"]) / px) if va and va.get("c") else None}
+                fila.update(m)
+                if m and ust:
+                    fila["spread"] = (m["tir"] - ust_a(m["md"])) * 100
+                filas_b.append(fila)
             bonos.append({"grupo": grupo, "filas": filas_b})
+        # Desvío contra la curva: ajuste TIR = a + b·ln(duration) por legislación
+        for ley in ("NY", "ARG"):
+            todos = [f for g in bonos for f in g["filas"] if f.get("ley") == ley and f.get("md", 0) > 0.05]
+            pts = [f for f in todos if f["t"] not in _NUEVOS]  # la curva se arma con los bonos de la reestructuración
+            if len(pts) >= 3:
+                xs = [math.log(f["md"]) for f in pts]
+                ys = [f["tir"] for f in pts]
+                mx_, my_ = sum(xs) / len(xs), sum(ys) / len(ys)
+                b_ = sum((x - mx_) * (y - my_) for x, y in zip(xs, ys)) / sum((x - mx_) ** 2 for x in xs)
+                a_ = my_ - b_ * mx_
+                for f in todos:
+                    f["vs_curva"] = (f["tir"] - (a_ + b_ * math.log(f["md"]))) * 100
     except Exception as e:
         aviso(f"no se pudieron traer los bonos ({e})")
 
@@ -558,8 +671,10 @@ header .sub{color:#777;margin:0;font-size:12px}
 header select{background:#000;color:var(--amb);border:1px solid #444;border-radius:0;font:600 12px "IBM Plex Mono",monospace;padding:2px 6px}
 header select option{color:#fff;background:#000}
 .live{color:var(--good)}
-.fk{display:flex;flex-wrap:wrap;gap:2px;margin:0 -8px;padding:4px 8px;border-bottom:1px solid #222;background:#000}
-.fk button{background:#1c1c1c;color:#ddd;border:0;border-radius:0;padding:3px 10px;font:500 11.5px "IBM Plex Mono",monospace;cursor:pointer}
+.fk{display:flex;flex-wrap:wrap;gap:4px;margin:0 -8px;padding:6px 8px;border-bottom:1px solid #222;background:#000}
+.fk button{background:#1c1c1c;color:#ddd;border:1px solid #2e2e2e;border-radius:0;padding:8px 16px;font:600 14px "IBM Plex Mono",monospace;cursor:pointer;min-height:38px}
+.fk button:hover{background:#2a2a2a}
+@media (max-width:700px){.fk button{padding:8px 11px;font-size:13px;flex:1 1 auto}}
 .fk button b{color:var(--amb);margin-right:4px}
 .fk button[aria-pressed="true"]{background:var(--amb);color:#000}.fk button[aria-pressed="true"] b{color:#000}
 .tick{white-space:nowrap;overflow-x:auto;margin:0 -8px;padding:5px 10px;border-bottom:1px solid #222;background:#050505;color:#ccc;font-size:12px}
@@ -604,6 +719,10 @@ tbody tr:nth-child(even) td{background:#0d0d0d}
 footer{color:#555;font-size:10.5px;margin-top:6px}
 select.nm{background:#000!important;color:var(--amb)!important;border:1px solid #444!important;border-radius:0!important;font:600 11px "IBM Plex Mono",monospace!important}
 [data-sec].oculto{display:none!important}
+.ley{display:inline-block;border:1px solid #555;color:#aaa;font-size:10.5px;padding:0 4px}.ley.ny{border-color:var(--amb);color:var(--amb)}
+#tbon td.tir{color:var(--amb);font-weight:600}
+#tbon tr[data-bono]{cursor:pointer}#tbon tr.sel td{background:#1a1300!important}
+#tbon td,#tbon th{padding:4px 8px}
 .panel>p.n,.panel>p{padding:0 10px}
 .mkt td:nth-child(2),.esc td:nth-child(2n){color:#fff;font-weight:600}
 .duo{gap:0}
@@ -680,6 +799,13 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <div class="chartbox" style="height:300px"><canvas id="c8" aria-label="Inflación mensual del INDEC de los últimos 24 meses, con la interanual"></canvas></div>
   </section>
 
+  <section data-sec="bonos" class="panel" id="pbon">
+    <div class="phead"><h2>Bonos soberanos en dólares (MEP)</h2></div>
+    <div class="tablewrap"><table class="mkt" id="tbon"></table></div>
+    <p class="n" style="margin:8px 0 0">Precio sucio cada 100 nominales en USD MEP (especie D), liquidación T+1. TIR efectiva anual; vs curva: desvío contra la curva de los bonos de la reestructuración de su misma ley; spread: contra el Tesoro de EE.UU. a igual duration. Hacé clic en un bono para ver sus flujos pendientes. Fuentes: data912, Yahoo Finance.</p>
+    <div id="flujos" style="margin-top:8px"></div>
+  </section>
+
   <div class="duo">
     <section data-sec="bonos" class="panel" id="pk">
       <div class="phead"><h2>Escenarios: precio según probabilidad K</h2></div>
@@ -692,12 +818,6 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
       <p class="n" id="nrn" style="margin:8px 0 0"></p>
     </section>
   </div>
-
-  <section data-sec="bonos" class="panel" id="pbon">
-    <div class="phead"><h2>Bonos soberanos en dólares (MEP)</h2></div>
-    <div class="tablewrap"><table class="mkt" id="tbon"></table></div>
-    <p class="n" style="margin:8px 0 0">Precio cada 100 nominales en USD MEP (especie D) y variación porcentual. Fuente: data912.</p>
-  </section>
 
   <section data-sec="adrs" class="panel" id="padr">
     <div class="phead"><h2>ADRs argentinos en Nueva York</h2></div>
@@ -968,8 +1088,25 @@ function celda(v){
 (function mercados(){
   const B=D.bonos||[], A=D.adrs||[], cols="<th>Precio</th><th>1 día</th><th>5 días</th><th>1 mes</th><th>En el año</th>";
   if(B.some(g=>g.filas.length)){
-    document.getElementById("tbon").innerHTML=`<thead><tr><th>Bono</th>${cols}</tr></thead><tbody>`+
-      B.map(g=>`<tr class="grp"><td colspan="6">${g.grupo}</td></tr>`+g.filas.map(r=>`<tr><td class="t">${r.t}</td><td>${fmt(r.precio,2)}</td>${celda(r.d1)}${celda(r.d5)}${celda(r.m1)}${celda(r.ytd)}</tr>`).join("")).join("")+"</tbody>";
+    const f2=(v,d=2)=>v==null?"–":fmt(+v,d), vol=v=>v==null?"–":(v>=1e6?fmt(v/1e6,1)+"M":v>=1e3?fmt(v/1e3,0)+"K":fmt(v,0));
+    const fv=iso=>{if(!iso) return "–"; const[y,m,d]=iso.split("-"); return `${d}-${["ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"][+m-1]}-${y.slice(2)}`;};
+    const bp=v=>v==null?'<td class="pc">–</td>':`<td class="pc ${v>0?"up":v<0?"down":""}">${v>0?"+":""}${fmt(v,0)}</td>`;
+    const hdr="<th>Ticker</th><th>Ley</th><th>Cupón</th><th>Vencimiento</th><th>Compra</th><th>Venta</th><th>Último</th><th>Día</th><th>TIR</th><th>TNA 180/360</th><th>Dur. mod.</th><th>Convexidad</th><th>Paridad</th><th>Valor técnico</th><th>Vs curva (pb)</th><th>Spread (pb)</th><th>MEP implícito</th><th>Volumen</th>";
+    document.getElementById("tbon").innerHTML=`<thead><tr>${hdr}</tr></thead><tbody>`+
+      B.map(g=>`<tr class="grp"><td colspan="18">${g.grupo}</td></tr>`+g.filas.map(r=>`<tr data-bono="${r.t}"><td class="t">${r.t}</td><td><span class="ley ${r.ley==="NY"?"ny":""}">${r.ley}</span></td><td>${r.cupon!=null?fmt(r.cupon,3)+" %":"–"}</td><td>${fv(r.vto)}</td>`+
+        `<td>${f2(r.bid)}</td><td>${f2(r.ask)}</td><td class="val">${f2(r.precio)}</td><td class="pc ${r.d1>0?"up":r.d1<0?"down":""}">${r.d1!=null?(r.d1>0?"+":"")+fmt(r.d1,2)+" %":"–"}</td>`+
+        `<td class="tir">${r.tir!=null?fmt(r.tir,2)+" %":"–"}</td><td>${r.tna!=null?fmt(r.tna,2)+" %":"–"}</td><td>${f2(r.md)}</td><td>${f2(r.conv,1)}</td><td>${r.paridad!=null?fmt(r.paridad,1)+" %":"–"}</td><td>${f2(r.vt)}</td>`+
+        `${bp(r.vs_curva)}<td>${r.spread!=null?fmt(r.spread,0):"–"}</td><td>${r.mep?"$ "+fmt(r.mep,2):"–"}</td><td>${vol(r.vol)}</td></tr>`).join("")).join("")+"</tbody>";
+    // Flujos pendientes al hacer clic en un bono
+    document.querySelectorAll("#tbon tr[data-bono]").forEach(tr=>tr.onclick=()=>{
+      const r=B.flatMap(g=>g.filas).find(x=>x.t===tr.dataset.bono); const el=document.getElementById("flujos");
+      if(!r||!r.flujos){el.innerHTML="";return;}
+      let tc=0,ta=0;
+      el.innerHTML=`<div class="phead"><h2>Flujos pendientes de ${r.t} por cada 100 nominales</h2></div><div class="tablewrap"><table class="mkt"><thead><tr><th>Fecha</th><th>Interés</th><th>Amortización</th><th>Total</th></tr></thead><tbody>`+
+        r.flujos.map(f=>{tc+=f[1];ta+=f[2];return `<tr><td>${fv(f[0])}</td><td>${fmt(f[1],3)}</td><td>${fmt(f[2],3)}</td><td class="val">${fmt(f[1]+f[2],3)}</td></tr>`;}).join("")+
+        `<tr class="grp"><td>Total</td><td>${fmt(tc,2)}</td><td>${fmt(ta,2)}</td><td>${fmt(tc+ta,2)}</td></tr></tbody></table></div>`;
+      document.querySelectorAll("#tbon tr[data-bono]").forEach(x=>x.classList.toggle("sel",x===tr));
+    });
   } else document.getElementById("pbon").style.display="none";
   if(A.length){
     document.getElementById("tadr").innerHTML=`<thead><tr><th>ADR</th><th style="text-align:left">Empresa</th>${cols}</tr></thead><tbody>`+
@@ -1037,7 +1174,7 @@ function render(){
   const dif=(a,b)=>{const d=a-b;return `<b class="${cls(d)}">${d>=0?"arriba":"abajo"} por USD ${fmt(Math.abs(d),1)} M${b>0?` (${sg(pct(a,b))}${fmt(pct(a,b),1)} %)`:""}</b>`;};
   const hoyC=C[r-1], hoyP=P[r-1];
   const cmp=document.getElementById("cmp");
-  cmp.className="cmp"+(aC-aP<0?" neg":"");
+  cmp.classList.toggle("neg",aC-aP<0);
   cmp.innerHTML=r?`<h2>Rueda ${r} de ${MESES[+kC.slice(5)-1]} (${dmy(hoyC.fecha)}${hoyC.prov?", provisorio":""})</h2>
     <p class="big">A esta rueda de ${lab(kP).toLowerCase()} el BCRA llevaba USD ${fmt(aP,1)} M; hoy lleva USD ${fmt(aC,1)} M: ${dif(aC,aP)}.</p>
     <div class="rows">
