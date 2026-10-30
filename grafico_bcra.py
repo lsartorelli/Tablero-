@@ -28,6 +28,8 @@ ALIMENTOS = [  # precios medios INDEC, GBA
     ("asado", "Asado (kg)", "105.1_I2A_2016_M_14"),
     ("nalga", "Nalga (kg)", "105.1_I2N_2016_M_14"),
     ("picada", "Carne picada común (kg)", "105.1_I2CPC_2016_M_27"),
+    ("leche", "Leche en sachet (litro)", "105.1_I2LFES_2016_M_35"),
+    ("aceite", "Aceite de girasol (1,5 l)", "105.1_I2AG_2016_M_23"),
 ]
 INICIO_BANDAS = "2025-04-14"
 DOLARES_URL = "https://api.argentinadatos.com/v1/cotizaciones/dolares/{casa}"  # MEP, CCL y blue
@@ -242,7 +244,8 @@ def promedio_mensual(puntos):
 
 
 INDEC_PRECIOS_URL = "https://www.indec.gob.ar/ftp/cuadros/economia/sh_ipc_precios_promedio.xls"
-INDEC_NOMBRES = {"huevos de gallina": "huevos", "pollo entero": "pollo", "asado": "asado", "nalga": "nalga", "carne picada común": "picada"}
+INDEC_NOMBRES = {"huevos de gallina": "huevos", "pollo entero": "pollo", "asado": "asado", "nalga": "nalga", "carne picada común": "picada",
+                 "leche fresca entera en sachet": "leche", "aceite de girasol": "aceite"}
 
 
 def _mes_ant(k):
@@ -715,6 +718,32 @@ def main():
         historicos["reservas"] = {"f": fs, "v": [round(hist_r[f] / 1000, 2) for f in fs]}
     except Exception as e:
         aviso(f"no se pudo armar la serie histórica de reservas ({e})")
+    try:  # pobreza (EPH, 31 aglomerados): el dato con fecha AAAA-07 es el 1er semestre; AAAA-01, el 2do del año anterior
+        pob = []
+        for f, v in get_json(SERIES_URL.format(ids="64.2_POBLACION_NUA_0_0_34_74"))["data"]:
+            if v is None:
+                continue
+            y, m = int(f[:4]), int(f[5:7])
+            if f == "2016-07-01":
+                et = "2T-16"  # primer dato tras la normalización del INDEC: solo el 2do trimestre
+            elif m == 7:
+                et = f"1S-{str(y)[2:]}"
+            else:
+                et = f"2S-{str(y - 1)[2:]}"
+            if f >= "2016-01-01":  # la serie oficial previa usaba otra metodología y no es comparable
+                pob.append([et, round(v * 100, 1), f, "INDEC"])
+        # 2006-2015: serie comparable de CEDLAS-UNLP (metodología actual del INDEC con IPC alternativo 2007-2015)
+        cedlas = [("2006-07-01", 43.9), ("2007-01-01", 40.6), ("2007-07-01", 38.8), ("2008-01-01", 37.8), ("2008-07-01", 36.7),
+                  ("2009-01-01", 36.1), ("2009-07-01", 35.2), ("2010-01-01", 33.5), ("2010-07-01", 33.0), ("2011-01-01", 32.1),
+                  ("2011-07-01", 30.0), ("2012-01-01", 28.0), ("2012-07-01", 27.7), ("2013-01-01", 27.9), ("2013-07-01", 27.3),
+                  ("2014-01-01", 27.5), ("2014-07-01", 30.8), ("2015-01-01", 32.7), ("2015-07-01", 30.5), ("2016-01-01", None)]
+        pre = []
+        for f, v in cedlas:
+            y, m = int(f[:4]), int(f[5:7])
+            pre.append([f"1S-{str(y)[2:]}" if m == 7 else f"2S-{str(y - 1)[2:]}", v, f, "CEDLAS"])
+        historicos["pobreza"] = pre + pob
+    except Exception as e:
+        aviso(f"no se pudo traer la serie de pobreza ({e})")
     try:
         historicos["personas"] = personas_humanas(hoy)
     except Exception as e:
@@ -1108,6 +1137,25 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <p class="n" id="fnote" style="margin:8px 0 0"></p>
   </section>
 
+  <section data-sec="ipc" class="panel" id="ppob">
+    <div class="phead"><h2>Pobreza: personas bajo la línea de pobreza (%), últimos 20 años</h2></div>
+    <div class="gobs" id="pobcards"></div>
+    <div class="chartbox" style="height:340px"><canvas id="c16" aria-label="Porcentaje de personas bajo la línea de pobreza por semestre, según la EPH del INDEC"></canvas></div>
+    <p class="n" id="npob" style="margin:8px 0 0"></p>
+  </section>
+
+  <section data-sec="ipc" class="panel" id="canasta">
+    <div class="phead"><h2>Canasta: precios reales en índice (base 100)</h2>
+      <div class="seg" role="group" aria-label="Desde">
+        <button type="button" data-cb="2023-12" aria-pressed="true">Desde dic-23</button>
+        <button type="button" data-cb="12" aria-pressed="false">12 meses</button>
+        <button type="button" data-cb="2016-12" aria-pressed="false">Desde 2016</button>
+      </div></div>
+    <div class="chartbox" style="height:340px"><canvas id="c15" aria-label="Evolución real de los precios de la canasta en índice base 100"></canvas></div>
+    <div class="tablewrap"><table class="mkt" id="tcan"></table></div>
+    <p class="n" id="ncan" style="margin:8px 0 0"></p>
+  </section>
+
   <div id="avisos"></div>
   <footer>Fuente: API de Estadísticas Monetarias v4.0 del BCRA (variable 78, compras de divisas; 1, reservas; 4, dólar minorista promedio vendedor; 44 y 7, TAMAR y BADLAR de bancos privados en TNA). Riesgo país: índice EMBI de JP Morgan vía ArgentinaDatos. Bandas: variables 1187 y 1188 del BCRA. Alimentos: precios medios del IPC del INDEC en GBA, deflactados por IPC GBA (datos.gob.ar). Brechas: MEP, CCL y blue (ArgentinaDatos, precio de venta) contra el mayorista del mismo día (variable 5). Las tasas se publican con un día hábil de rezago. Los días marcados como provisorios salen del cierre informado por el BCRA o de tu carga manual, y se reemplazan por el dato oficial en la próxima ejecución. Las ruedas se comparan por orden dentro de cada mes, no por fecha.</footer>
 </div>
@@ -1273,6 +1321,39 @@ function alimentos(){
 }
 document.querySelectorAll("[data-v]").forEach(b=>b.onclick=()=>{vista=b.dataset.v;document.querySelectorAll("[data-v]").forEach(x=>x.setAttribute("aria-pressed",x===b));alimentos();});
 alimentos();
+
+// Canasta en índice base 100 (precios reales)
+const CAN_COL=["#ffb000","#00d26a","#3a8ee6","#ff3b3b","#b388ff","#5fd3e6","#ff66c4"];
+let c15, canDesde="2023-12";
+function canasta(){
+  const A=D.alimentos, panel=document.getElementById("canasta");
+  if(!A||!A.productos){panel.style.display="none";return;}
+  const keys=Object.keys(A.productos), m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  const meses=[...new Set(keys.flatMap(k=>A.productos[k].serie.map(x=>x.fecha.slice(0,7))))].sort();
+  let base=canDesde;
+  if(/^\d+$/.test(canDesde)){base=meses[Math.max(0,meses.length-1-+canDesde)];}
+  if(!meses.includes(base)) base=meses.find(x=>x>=base)||meses[0];
+  const L=meses.filter(x=>x>=base);
+  const series=keys.map(k=>{const mp=Object.fromEntries(A.productos[k].serie.map(x=>[x.fecha.slice(0,7),x.real])); const b=mp[base];
+    return {k,nombre:A.productos[k].nombre,data:L.map(x=>b&&mp[x]!=null?mp[x]/b*100:null)};}).filter(sr=>sr.data[0]!=null);
+  const prom=L.map((_,i)=>{const v=series.map(sr=>sr.data[i]).filter(x=>x!=null);return v.length?v.reduce((a,b)=>a+b,0)/v.length:null;});
+  c15?.destroy();
+  c15=new Chart(document.getElementById("c15"),{type:"line",data:{labels:L.map(mesCorto),datasets:[
+      ...series.map((sr,i)=>({label:sr.nombre,data:sr.data,borderColor:CAN_COL[i%CAN_COL.length],borderWidth:1.6,pointRadius:0,tension:.2})),
+      {label:"Promedio canasta",data:prom,borderColor:"#ffffff",borderWidth:3,borderDash:[6,4],pointRadius:0,tension:.2},
+      {label:"Base 100",data:L.map(()=>100),borderColor:"#555",borderWidth:1,pointRadius:0}]},
+    options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
+      plugins:{legend:{labels:{color:m,boxWidth:12,font,filter:it=>it.text!=="Base 100"}},tooltip:{callbacks:{label:it=>it.raw==null||it.dataset.label==="Base 100"?null:`${it.dataset.label}: ${fmt(it.raw,1)}`}}},
+      scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:12,maxRotation:0}},y:{grid:{color:g},ticks:{color:m,font}}}}});
+  const filas=series.map(sr=>({n:sr.nombre,v:sr.data[sr.data.length-1]})).sort((a,b)=>b.v-a.v);
+  const pc=v=>{const x=v-100;return `<td class="pc ${x>0?"up":x<0?"down":""}">${x>0?"+":""}${fmt(x,1)} %</td>`;};
+  document.getElementById("tcan").innerHTML=`<thead><tr><th>Producto</th><th>Índice</th><th>Variación real</th></tr></thead><tbody>`+
+    filas.map(f=>`<tr><td class="t">${f.n}</td><td>${fmt(f.v,1)}</td>${pc(f.v)}</tr>`).join("")+
+    `<tr style="font-weight:700"><td class="t" style="color:#fff">PROMEDIO CANASTA</td><td>${fmt(prom[prom.length-1],1)}</td>${pc(prom[prom.length-1])}</tr></tbody>`;
+  document.getElementById("ncan").textContent=`Precio de cada producto ajustado por inflación, igual a 100 en ${mesCorto(base)}. Arriba de 100: se encareció más que la inflación; abajo: se abarató en términos reales. Último dato: ${mesCorto(L[L.length-1])}. Fuente: INDEC, precios promedio en GBA.`;
+}
+document.querySelectorAll("[data-cb]").forEach(b=>b.onclick=()=>{canDesde=b.dataset.cb;document.querySelectorAll("[data-cb]").forEach(x=>x.setAttribute("aria-pressed",x===b));canasta();});
+setTimeout(canasta,0);  // espera a que se definan las utilidades de fechas
 
 pintarUltimos();
 document.getElementById("nmeses")?.addEventListener("change",pintarUltimos);
@@ -1442,6 +1523,35 @@ function reservasGob(){
 }
 reservasGob();
 
+// Pobreza
+let c16;
+function pobreza(){
+  const P=(D.historicos||{}).pobreza||[], panel=document.getElementById("ppob");
+  if(!P.length){panel.style.display="none";return;}
+  const m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  // se colorea según quién gobernó la mayor parte del semestre (mitad del período)
+  const medio=f=>{const y=+f.slice(0,4),mm=+f.slice(5,7);return mm===7?`${y}-04`:`${y-1}-10`;};
+  const colGob=f=>{const x=medio(f);return x<"2007-12"?"#7f8ea3":x<"2015-12"?"#3a8ee6":x<"2019-12"?"#ffb000":x<"2023-12"?"#00d26a":"#b388ff";};
+  const L=P.map(x=>x[0]), V=P.map(x=>x[1]);
+  const corte=P.findIndex(x=>x[3]==="INDEC");
+  c16?.destroy();
+  c16=new Chart(document.getElementById("c16"),{type:"bar",data:{labels:L,datasets:[{label:"Pobreza",data:V,backgroundColor:P.map(x=>colGob(x[2])+(x[3]==="CEDLAS"?"99":"")),borderColor:P.map(x=>colGob(x[2])),borderWidth:P.map(x=>x[3]==="CEDLAS"?1.5:0),borderRadius:0}]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},
+      lineasVert:{marcas:corte>0?[[corte-0.5,"SERIE OFICIAL INDEC →"]]:[]},
+      tooltip:{callbacks:{label:it=>it.raw==null?"sin dato":`${fmt(it.raw,1)} % de las personas (${P[it.dataIndex][3]==="CEDLAS"?"CEDLAS, serie comparable":"INDEC"})`}}},
+      scales:{x:{grid:{display:false},ticks:{color:m,font,maxRotation:90,autoSkip:false}},y:{beginAtZero:true,grid:{color:g},ticks:{color:m,font,callback:v=>v+" %"}}}},plugins:[lineasVert]});
+  const u=P[P.length-1], a=P[P.length-2], ia=P.find(x=>x[0]===u[0].replace(/\d\d$/,d=>String(+d-1).padStart(2,"0")));
+  const OK=P.filter(x=>x[1]!=null), max=OK.reduce((p,x)=>x[1]>p[1]?x:p), min=OK.reduce((p,x)=>x[1]<p[1]?x:p);
+  const pp=(x,y)=>{const d=x-y;return `${d>0?"+":""}${fmt(d,1)} pp`;};
+  document.getElementById("pobcards").innerHTML=
+    `<div style="--c:#ffb000"><div class="nm">ÚLTIMO DATO (${u[0]})</div><div class="pc">${fmt(u[1],1)} %</div><div class="ab">${pp(u[1],a[1])} vs ${a[0]}</div><div class="rg">${ia?pp(u[1],ia[1])+" vs "+ia[0]:""}</div></div>`+
+    `<div style="--c:#ff3b3b"><div class="nm">MÁXIMO 20 AÑOS</div><div class="pc">${fmt(max[1],1)} %</div><div class="rg">${max[0]}</div></div>`+
+    `<div style="--c:#00d26a"><div class="nm">MÍNIMO 20 AÑOS</div><div class="pc">${fmt(min[1],1)} %</div><div class="rg">${min[0]}</div></div>`+
+    `<div style="--c:#7f8ea3"><div class="nm">GOBIERNOS</div><div class="rg" style="margin-top:6px;line-height:1.7"><span style="color:#7f8ea3">■</span> N. Kirchner · <span style="color:#3a8ee6">■</span> C. Fernández<br><span style="color:#ffb000">■</span> Macri · <span style="color:#00d26a">■</span> A. Fernández · <span style="color:#b388ff">■</span> Milei</div></div>`;
+  document.getElementById("npob").textContent=`Porcentaje de personas en hogares con ingresos por debajo de la canasta básica total, por semestre (1S: enero a junio; 2S: julio a diciembre), en los 31 aglomerados urbanos de la EPH. Barras translúcidas (2006-2015): serie comparable de CEDLAS-UNLP, que aplica la metodología actual del INDEC a la EPH con índices de precios alternativos para 2007-2015, cuando el INDEC estuvo intervenido; el 2.º semestre de 2015 no tiene dato. Desde el 2.º trimestre de 2016: serie oficial del INDEC, que se publica en marzo y septiembre. Fuentes: CEDLAS-UNLP, INDEC vía datos.gob.ar.`;
+}
+pobreza();
+
 // Compras de personas humanas
 let c13;
 function personas(){
@@ -1590,7 +1700,7 @@ function render(){
 
 }
 document.querySelectorAll("[data-mode]").forEach(b=>b.onclick=()=>{mode=b.dataset.mode;document.querySelectorAll("[data-mode]").forEach(x=>x.setAttribute("aria-pressed",x===b));render();});
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();inflacion();});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();inflacion();});
 render();
 function avisos(){const A=D.avisos||[], el=document.getElementById("avisos"); el.innerHTML=A.length?`<section class="panel" style="border-color:var(--bad)"><div class="k" style="color:var(--bad)">Avisos de la última actualización</div><ul class="n" style="margin:6px 0 0;padding-left:18px">${A.map(a=>`<li>${a.replace(/</g,"&lt;")}</li>`).join("")}</ul></section>`:"";}
 avisos();
@@ -1620,7 +1730,7 @@ document.addEventListener("keydown",e=>{ if(e.target.tagName==="SELECT"||e.targe
 })();
 (function reloj(){const el=document.getElementById("clk"); const f=()=>{el.textContent=new Date().toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})+" ART";}; f(); setInterval(f,30000);})();
 // Redibuja cuando termina de cargar la tipografía, para que las etiquetas midan bien
-if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();inflacion();});
+if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();inflacion();});
 // Recarga la página cada 10 minutos para tomar la última versión generada
 // Recarga salteando la caché del navegador (agrega ?t=… al link)
 const recargar=()=>location.replace(location.pathname+"?t="+Date.now()+location.hash);
