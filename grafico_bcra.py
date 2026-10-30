@@ -73,15 +73,7 @@ ADRS = [("GGAL", "Grupo Galicia"), ("BMA", "Banco Macro"), ("BBAR", "BBVA Argent
         ("CEPU", "Central Puerto"), ("EDN", "Edenor"), ("TEO", "Telecom"), ("LOMA", "Loma Negra"),
         ("CRESY", "Cresud"), ("IRS", "IRSA"), ("CAAP", "Corporación América"), ("TX", "Ternium"),
         ("TS", "Tenaris"), ("MELI", "Mercado Libre"), ("GLOB", "Globant"), ("BIOX", "Bioceres")]
-PM_EVENT_URL = "https://gamma-api.polymarket.com/events?slug=argentina-presidential-election-winner"
-PM_HIST_URL = "https://clob.polymarket.com/prices-history?market={tok}&interval=max&fidelity=1440"
 VAR_INFL_M, VAR_INFL_IA = 27, 28  # inflación mensual e interanual (INDEC, vía BCRA)
-PM_INFL_SLUG = "argentina-monthly-inflation-{mes}-{anio}"
-MESES_EN = ["january", "february", "march", "april", "may", "june", "july", "august",
-            "september", "october", "november", "december"]
-PERONISTAS = ["Axel Kicillof", "Sergio Massa", "Cristina Fernández de Kirchner", "Eduardo Enrique \"Wado\" de Pedro",
-              "Juan Grabois", "Máximo Kirchner", "Jorge Capitanich", "Sergio Uñac", "Juan Manzur", "Victoria Tolosa Paz",
-              "Ricardo Quintela", "Agustín Rossi", "Mayra Mendoza", "Guillermo Moreno"]
 VAR_ENCAJES, VAR_BASE = 1256, 15  # cuenta corriente en moneda extranjera en el BCRA (millones de $), base monetaria
 
 
@@ -371,38 +363,7 @@ def main():
     except Exception as e:
         aviso(f"no se pudieron traer los ADRs ({e})")
 
-    # --- Polymarket: ganador de la elección presidencial 2027
-    polymarket = {}
-    try:
-        ev = get_json(PM_EVENT_URL)[0]
-        cands = []
-        for m in ev["markets"]:
-            if m.get("closed"):
-                continue
-            try:
-                cands.append({"nombre": m["groupItemTitle"], "p": float(json.loads(m["outcomePrices"])[0]) * 100,
-                              "tok": json.loads(m["clobTokenIds"])[0]})
-            except Exception:
-                pass
-        cands.sort(key=lambda x: -x["p"])
-        peron = sum(c["p"] for c in cands if c["nombre"] in PERONISTAS)
-        series = []
-        for c in cands[:5]:
-            try:
-                h = get_json(PM_HIST_URL.format(tok=c["tok"]))["history"]
-                pts = {}
-                for x in h:  # un punto por día (el último del día)
-                    pts[dt.datetime.fromtimestamp(x["t"]).date().isoformat()] = round(x["p"] * 100, 2)
-                series.append({"nombre": c["nombre"], "p": c["p"], "hist": sorted(pts.items())})
-            except Exception as e:
-                aviso(f"sin historial de Polymarket para {c['nombre']} ({e})")
-        polymarket = {"titulo": ev.get("title"), "volumen": float(ev.get("volume") or 0),
-                      "top": [{"nombre": c["nombre"], "p": c["p"]} for c in cands[:8]],
-                      "peronismo": peron, "series": series}
-    except Exception as e:
-        aviso(f"no se pudo traer Polymarket ({e})")
-
-    # --- Inflación INDEC y mercado de Polymarket del próximo dato
+    # --- Inflación INDEC
     inflacion = {}
     try:
         im = serie(VAR_INFL_M, (hoy - dt.timedelta(days=800)).isoformat())
@@ -427,46 +388,6 @@ def main():
         inflacion["acumulado"] = {"valor": (nivel - 1) * 100, "anio": anio}
     except Exception as e:
         aviso(f"no se pudo traer la inflación ({e})")
-    try:
-        ult = inflacion["mensual"][-1]["mes"] if inflacion.get("mensual") else hoy.strftime("%Y-%m")
-        y, m = map(int, ult.split("-"))
-        m += 1
-        if m > 12:
-            m, y = 1, y + 1
-        ev = get_json(PM_EVENT_URL.split("?")[0] + "?slug=" + PM_INFL_SLUG.format(mes=MESES_EN[m - 1], anio=y))[0]
-        rangos, hist_ev = [], {}
-        for i, mk in enumerate(sorted(ev["markets"], key=lambda x: int(x.get("groupItemThreshold") or 0))):
-            nombre = mk["groupItemTitle"]
-            nums = [float(t) for t in __import__("re").findall(r"\d+(?:\.\d+)?", nombre)]
-            if "≤" in nombre or "<" in nombre:
-                medio = nums[0] - 0.1
-            elif "+" in nombre:
-                medio = nums[0] + 0.1
-            else:
-                medio = sum(nums) / len(nums)
-            p_act = float(json.loads(mk["outcomePrices"])[0])
-            rangos.append({"rango": nombre, "p": p_act * 100, "medio": medio})
-            try:
-                h = get_json(PM_HIST_URL.format(tok=json.loads(mk["clobTokenIds"])[0]).replace("fidelity=1440", "fidelity=360"))["history"]
-                for x in h:
-                    f = dt.datetime.fromtimestamp(x["t"]).strftime("%Y-%m-%d")
-                    hist_ev.setdefault(f, {})[nombre] = (x["p"], medio)
-            except Exception:
-                pass
-        esperado = []
-        for f in sorted(hist_ev):
-            d = hist_ev[f]
-            if len(d) == len(rangos):
-                tot = sum(p for p, _ in d.values())
-                if tot > 0:
-                    esperado.append([f, round(sum(p * mm for p, mm in d.values()) / tot, 3)])
-        tot = sum(r["p"] for r in rangos) or 1
-        inflacion["polymarket"] = {"mes": f"{y}-{m:02d}", "titulo": ev.get("title"), "volumen": float(ev.get("volume") or 0),
-                                   "rangos": rangos, "esperado": sum(r["p"] * r["medio"] for r in rangos) / tot,
-                                   "historia": esperado}
-    except Exception as e:
-        aviso(f"no se encontró el mercado de inflación en Polymarket ({e})")
-
     alimentos = {}
     try:
         ids = [IPC_GBA] + [x[2] for x in ALIMENTOS]
@@ -493,9 +414,7 @@ def main():
         "dolar": dolar,
         "alimentos": alimentos,
         "escenarios": escenarios,
-        "polymarket": polymarket,
         "avisos": AVISOS,
-        "peronistas": PERONISTAS,
         "inflacion": inflacion,
         "bonos": bonos,
         "adrs": adrs,
@@ -591,13 +510,7 @@ select,button{font:500 14px Archivo,sans-serif;color:var(--ink);background:var(-
 .mkt td.t{font-weight:700}
 .mkt td.nm{color:var(--muted)}
 .mkt td.pc{font-variant-numeric:tabular-nums;font-weight:600}
-.pmcards{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px}
-.pmcards>div{background:var(--panel2);border-radius:10px;padding:8px 12px;min-width:120px;border-left:4px solid var(--c,var(--line))}
-.pmcards .v{font-size:20px;margin-top:0}
-.pmcards .pj{background:color-mix(in srgb,var(--res) 18%,var(--panel));border-left-color:var(--res)}
-.pmi{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px}
-@media (max-width:800px){.pmi{grid-template-columns:minmax(0,1fr)}}
-.ind select.nm{font:600 13px Archivo,sans-serif;padding:1px 4px;border-radius:6px;margin:0 2px;background:var(--panel);color:var(--ink)}
+@media (max-width:800px){.ind select.nm{font:600 13px Archivo,sans-serif;padding:1px 4px;border-radius:6px;margin:0 2px;background:var(--panel);color:var(--ink)}
 .cmp{border-radius:14px;padding:16px 18px;margin:16px 0 0;border:1px solid color-mix(in srgb,var(--good) 40%,var(--line));
   background:linear-gradient(120deg,color-mix(in srgb,var(--good) 16%,var(--panel)),var(--panel))}
 .cmp.neg{border-color:color-mix(in srgb,var(--bad) 40%,var(--line));background:linear-gradient(120deg,color-mix(in srgb,var(--bad) 16%,var(--panel)),var(--panel))}
@@ -687,30 +600,9 @@ footer{font-size:12.5px;color:var(--muted)}
     <p class="n" id="ncm" style="margin:8px 0 0"></p>
   </section>
 
-  <section class="panel" id="ppm">
-    <div class="phead"><h2>Polymarket: ¿quién gana la elección presidencial 2027?</h2>
-      <div class="seg" role="group" aria-label="Período">
-        <button type="button" data-pm="30" aria-pressed="false">1 mes</button>
-        <button type="button" data-pm="90" aria-pressed="false">3 meses</button>
-        <button type="button" data-pm="0" aria-pressed="true">Todo</button>
-      </div></div>
-    <div class="pmcards" id="pmcards"></div>
-    <div class="chartbox" style="height:320px"><canvas id="c7" aria-label="Probabilidad de ganar la elección presidencial 2027 según Polymarket, por candidato"></canvas></div>
-    <p class="n" id="npm" style="margin:8px 0 0"></p>
-  </section>
-
   <section class="panel" id="pinf">
     <div class="phead"><h2>Inflación mensual (INDEC)</h2><span class="n" id="infsub"></span></div>
     <div class="chartbox" style="height:300px"><canvas id="c8" aria-label="Inflación mensual del INDEC de los últimos 24 meses, con la interanual"></canvas></div>
-  </section>
-
-  <section class="panel" id="ppmi">
-    <div class="phead"><h2 id="pmit">Polymarket: inflación del próximo mes</h2></div>
-    <div class="pmi">
-      <div><div class="k" style="margin-bottom:6px">Probabilidad por rango</div><div class="chartbox" style="height:280px"><canvas id="c9"></canvas></div></div>
-      <div><div class="k" style="margin-bottom:6px">Inflación esperada por el mercado, día a día</div><div class="chartbox" style="height:280px"><canvas id="c10"></canvas></div></div>
-    </div>
-    <p class="n" id="npmi" style="margin:8px 0 0"></p>
   </section>
 
   <div class="duo">
@@ -959,34 +851,8 @@ function meses12(){
 }
 meses12();
 
-// Polymarket
-let c7, pmDias=0;
-const PMCOL=["#7c3aed","#0ea5e9","#f59e0b","#ef4444","#64748b"];
-function polymarket(){
-  const P=D.polymarket, panel=document.getElementById("ppm");
-  if(!P||!P.series||!P.series.length){pmMsg("ppm",".chartbox",D._pmE||"Consultando Polymarket…");return;} pmMsg("ppm",".chartbox","");
-  const col=n=>{const i=P.series.findIndex(s=>s.nombre===n);return i>=0?PMCOL[i]:"var(--line)";};
-  document.getElementById("pmcards").innerHTML=P.top.slice(0,5).map(c=>`<div style="--c:${col(c.nombre)}"><div class="k">${c.nombre}</div><div class="v">${fmt(c.p,1)} %</div></div>`).join("")+
-    `<div class="pj"><div class="k">Peronismo (suma)</div><div class="v">${fmt(P.peronismo,1)} %</div></div>`;
-  const fechas=[...new Set(P.series.flatMap(s=>s.hist.map(h=>h[0])))].sort();
-  let desde=fechas[0];
-  if(pmDias){const d=new Date(fechas[fechas.length-1]);d.setDate(d.getDate()-pmDias);desde=d.toISOString().slice(0,10);}
-  const L=fechas.filter(f=>f>=desde);
-  const m=css("--muted"),g=css("--line"),font={family:"Archivo"};
-  c7?.destroy();
-  c7=new Chart(document.getElementById("c7"),{type:"line",data:{labels:L.map(f=>dmy(f).slice(0,5)+"/"+f.slice(2,4)),
-    datasets:P.series.map((s,i)=>{const mp=Object.fromEntries(s.hist);return {label:s.nombre,data:L.map(f=>mp[f]??null),spanGaps:true,
-      borderColor:PMCOL[i],backgroundColor:PMCOL[i],borderWidth:i===0?3:2,pointRadius:0,tension:.2};})},
-    options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
-      plugins:{legend:{labels:{color:m,boxWidth:12,font}},tooltip:{callbacks:{label:it=>it.raw==null?null:`${it.dataset.label}: ${fmt(it.raw,1)} %`}}},
-      scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:8,maxRotation:0}},y:{min:0,grid:{color:g},ticks:{color:m,font,callback:v=>v+" %"}}}}});
-  document.getElementById("npm").textContent=`Probabilidad implícita en el precio de cada contrato del mercado "${P.titulo}" (volumen operado: USD ${fmt(P.volumen/1e6,2)} M). Peronismo suma Kicillof, Massa, Cristina Kirchner, De Pedro y otros dirigentes del espacio. Fuente: Polymarket.`;
-}
-document.querySelectorAll("[data-pm]").forEach(b=>b.onclick=()=>{pmDias=+b.dataset.pm;document.querySelectorAll("[data-pm]").forEach(x=>x.setAttribute("aria-pressed",x===b));polymarket();});
-polymarket();
-
-// Inflación INDEC y Polymarket
-let c8,c9,c10;
+// Inflación INDEC
+let c8;
 function inflacion(){
   const F=D.inflacion||{}, M=(F.mensual||[]).slice(-24), IA=Object.fromEntries((F.interanual||[]).map(x=>[x.mes,x.valor]));
   const m=css("--muted"),g=css("--line"),font={family:"Archivo"};
@@ -1005,27 +871,6 @@ function inflacion(){
     document.getElementById("infsub").textContent="Últimos 24 meses · fuente: INDEC vía BCRA";
   } else document.getElementById("pinf").style.display="none";
 
-  const P=F.polymarket;
-  if(!P||!P.rangos){pmMsg("ppmi",".pmi",D._pmI||"Consultando Polymarket…");return;} pmMsg("ppmi",".pmi","");
-  const [py,pm]=P.mes.split("-"), nombreMes=MESES[+pm-1];
-  document.getElementById("pmit").textContent=`Polymarket: inflación de ${nombreMes} ${py}`;
-  const maxP=Math.max(...P.rangos.map(r=>r.p));
-  const rgo=t=>t.replace(" to "," a ").replace(/(\d)\.(\d)/g,"$1,$2").replace("%"," %");
-  c9?.destroy();
-  c9=new Chart(document.getElementById("c9"),{type:"bar",data:{labels:P.rangos.map(r=>rgo(r.rango)),datasets:[{label:"Probabilidad",data:P.rangos.map(r=>r.p),borderRadius:4,
-      backgroundColor:P.rangos.map(r=>r.p===maxP?css("--cur"):css("--prev"))}]},
-    options:{indexAxis:"y",responsive:true,maintainAspectRatio:false,layout:{padding:{left:8}},plugins:{legend:{display:false},tooltip:{callbacks:{label:it=>`${fmt(it.raw,1)} %`}}},
-      scales:{x:{beginAtZero:true,grid:{color:g},ticks:{color:m,font,callback:v=>v+" %"}},y:{grid:{display:false},ticks:{color:m,font}}}}});
-  const H=P.historia||[];
-  c10?.destroy();
-  if(H.length){
-    c10=new Chart(document.getElementById("c10"),{type:"line",data:{labels:H.map(x=>dmy(x[0]).slice(0,5)),datasets:[
-      {label:"Inflación esperada",data:H.map(x=>x[1]),borderColor:css("--bad"),backgroundColor:css("--bad")+"1f",fill:true,borderWidth:2.5,pointRadius:2,tension:.25}]},
-      options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:it=>`${fmt(it.raw,2)} %`}}},
-        scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:7,maxRotation:0}},y:{grid:{color:g},ticks:{color:m,font,callback:v=>fmt(v,2)+" %"}}}}});
-  }
-  const top=P.rangos.reduce((a,b)=>b.p>a.p?b:a);
-  document.getElementById("npmi").textContent=`Rango más probable: ${rgo(top.rango)} (${fmt(top.p,1)} %). Inflación esperada por el mercado: ${fmt(P.esperado,2)} %, calculada con el punto medio de cada rango. Volumen operado: USD ${fmt(P.volumen,0)}. El mercado cambia solo al siguiente mes cuando el INDEC publica el dato. Fuente: Polymarket.`;
 }
 inflacion();
 
@@ -1140,51 +985,13 @@ function render(){
 
 }
 document.querySelectorAll("[data-mode]").forEach(b=>b.onclick=()=>{mode=b.dataset.mode;document.querySelectorAll("[data-mode]").forEach(x=>x.setAttribute("aria-pressed",x===b));render();});
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();polymarket();inflacion();});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();inflacion();});
 render();
 function avisos(){const A=D.avisos||[], el=document.getElementById("avisos"); el.innerHTML=A.length?`<section class="panel" style="border-color:var(--bad)"><div class="k" style="color:var(--bad)">Avisos de la última actualización</div><ul class="n" style="margin:6px 0 0;padding-left:18px">${A.map(a=>`<li>${a.replace(/</g,"&lt;")}</li>`).join("")}</ul></section>`:"";}
 avisos();
 
-// Polymarket desde el navegador: si el servidor que genera la página no pudo consultarlo
-// (GitHub Actions corre en EE.UU. y Polymarket puede rechazarlo), lo pide tu navegador directamente.
-const PM_API="https://gamma-api.polymarket.com/events?slug=", PM_H="https://clob.polymarket.com/prices-history?interval=max&market=";
-const MESES_EN=["january","february","march","april","may","june","july","august","september","october","november","december"];
-async function pmGet(u){const r=await fetch(u);if(!r.ok)throw new Error("HTTP "+r.status);return r.json();}
-const isoLocal=t=>{const d=new Date(t*1000);return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");};
-async function pmEleccion(){
-  const ev=(await pmGet(PM_API+"argentina-presidential-election-winner"))[0];
-  const c=ev.markets.filter(m=>!m.closed&&m.outcomePrices&&m.clobTokenIds).map(m=>({nombre:m.groupItemTitle,p:+JSON.parse(m.outcomePrices)[0]*100,tok:JSON.parse(m.clobTokenIds)[0]})).sort((a,b)=>b.p-a.p);
-  const PER=D.peronistas||[];
-  const series=await Promise.all(c.slice(0,5).map(async x=>{const h=(await pmGet(PM_H+x.tok+"&fidelity=1440")).history, pts={};
-    h.forEach(y=>pts[isoLocal(y.t)]=Math.round(y.p*10000)/100); return {nombre:x.nombre,p:x.p,hist:Object.entries(pts).sort()};}));
-  return {titulo:ev.title,volumen:+ev.volume||0,top:c.slice(0,8).map(x=>({nombre:x.nombre,p:x.p})),peronismo:c.filter(x=>PER.includes(x.nombre)).reduce((a,x)=>a+x.p,0),series};
-}
-async function pmInflacionNav(){
-  const M=(D.inflacion||{}).mensual||[]; const ult=M.length?M[M.length-1].mes:new Date().toISOString().slice(0,7);
-  let [y,m]=ult.split("-").map(Number); m++; if(m>12){m=1;y++;}
-  const ev=(await pmGet(PM_API+`argentina-monthly-inflation-${MESES_EN[m-1]}-${y}`))[0];
-  const mk=ev.markets.filter(k=>k.outcomePrices&&k.clobTokenIds).sort((a,b)=>(+a.groupItemThreshold||0)-(+b.groupItemThreshold||0));
-  const rangos=mk.map(k=>{const t=k.groupItemTitle, n=(t.match(/\d+(?:\.\d+)?/g)||[]).map(Number);
-    const medio=/[≤<]/.test(t)?n[0]-0.1:(t.includes("+")?n[0]+0.1:n.reduce((a,b)=>a+b,0)/n.length);
-    return {rango:t,p:+JSON.parse(k.outcomePrices)[0]*100,medio,tok:JSON.parse(k.clobTokenIds)[0]};});
-  const porDia={};
-  await Promise.all(rangos.map(async r=>{try{(await pmGet(PM_H+r.tok+"&fidelity=360")).history.forEach(x=>{(porDia[isoLocal(x.t)]??={})[r.rango]=[x.p,r.medio];});}catch(e){}}));
-  const historia=Object.keys(porDia).sort().filter(f=>Object.keys(porDia[f]).length===rangos.length).map(f=>{const v=Object.values(porDia[f]),t=v.reduce((a,x)=>a+x[0],0);return t>0?[f,Math.round(v.reduce((a,x)=>a+x[0]*x[1],0)/t*1000)/1000]:null;}).filter(Boolean);
-  const tot=rangos.reduce((a,r)=>a+r.p,0)||1;
-  return {mes:`${y}-${String(m).padStart(2,"0")}`,titulo:ev.title,volumen:+ev.volume||0,rangos,esperado:rangos.reduce((a,r)=>a+r.p*r.medio,0)/tot,historia};
-}
-function pmMsg(id,sel,txt){const panel=document.getElementById(id); if(!panel) return; const box=panel.querySelector(sel); if(box) box.style.display=txt?"none":"";
-  let p=panel.querySelector(".pmmsg"); if(txt){if(!p){p=document.createElement("p");p.className="n pmmsg";panel.appendChild(p);} p.textContent=txt;} else if(p) p.remove();}
-function sinAvisoPM(){D.avisos=(D.avisos||[]).filter(a=>!/polymarket/i.test(a)); avisos();}
-if(!D.polymarket||!D.polymarket.series||!D.polymarket.series.length){
-  pmEleccion().then(p=>{D.polymarket=p;sinAvisoPM();polymarket();}).catch(e=>{D._pmE="No se pudo consultar Polymarket ("+e.message+").";polymarket();});
-}
-if(!D.inflacion||!D.inflacion.polymarket){
-  D.inflacion=D.inflacion||{};
-  pmInflacionNav().then(p=>{D.inflacion.polymarket=p;sinAvisoPM();inflacion();}).catch(e=>{D._pmI="No se encontró el mercado de inflación de Polymarket ("+e.message+").";inflacion();});
-}
 // Redibuja cuando termina de cargar la tipografía, para que las etiquetas midan bien
-if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();polymarket();inflacion();});
+if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();inflacion();});
 // Recarga la página cada 10 minutos para tomar la última versión generada
 setInterval(()=>{ if(!document.hidden) location.reload(); }, 10*60*1000);
 </script>
