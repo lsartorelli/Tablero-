@@ -168,6 +168,79 @@ def metricas_bono(t, precio, liq):
             "flujos": [[f[0].isoformat(), round(f[1], 4), round(f[2], 4)] for f in fut]}
 
 
+ITCRM_URL = "https://www.bcra.gob.ar/archivos/Pdfs/PublicacionesEstadisticas/ITCRMSerie.xlsx"
+INFL_URL = "https://api.argentinadatos.com/v1/finanzas/indices/inflacion"
+IPC_SAN_LUIS = "197.1_NIVEL_GENERAL_2014_0_13"  # IPC San Luis: reemplaza al INDEC intervenido 2007-2016
+MERVAL_URL = "https://query1.finance.yahoo.com/v8/finance/chart/%5EMERV?range=max&interval=1mo"
+
+
+def get_bytes(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=90) as r:
+            return r.read()
+    except urllib.error.URLError as e:
+        if isinstance(getattr(e, "reason", None), ssl.SSLError):
+            with urllib.request.urlopen(req, timeout=90, context=ssl._create_unverified_context()) as r:
+                return r.read()
+        raise
+
+
+def itcrm_mensual():
+    """Lee la hoja de promedios mensuales del Excel del BCRA sin librerías externas."""
+    import io, re as _re, zipfile
+    z = zipfile.ZipFile(io.BytesIO(get_bytes(ITCRM_URL)))
+    wb = z.read("xl/workbook.xml").decode("utf-8")
+    rels = dict(_re.findall(r'Id="(rId\d+)"[^>]*Target="([^"]+)"', z.read("xl/_rels/workbook.xml.rels").decode("utf-8")))
+    rid = next(r for n, r in _re.findall(r'<sheet [^>]*name="([^"]+)"[^>]*r:id="([^"]+)"', wb) if "mens" in n.lower())
+    xml = z.read("xl/" + rels[rid].lstrip("/").replace("xl/", "")).decode("utf-8")
+    out = {}
+    for fila in _re.findall(r"<row [^>]*>(.*?)</row>", xml, _re.S):
+        celdas = dict(_re.findall(r'<c r="([A-Z]+)\d+"[^>]*?(?:/>|>(?:<f>.*?</f>)?<v>([^<]*)</v>)', fila))
+        try:
+            f = dt.date(1899, 12, 30) + dt.timedelta(days=int(float(celdas["A"])))
+            if f.year >= 1997:
+                out[f.strftime("%Y-%m")] = float(celdas["B"])
+        except (KeyError, ValueError):
+            pass
+    return out
+
+
+def _mes_sig(k):
+    y, m = map(int, k.split("-"))
+    m += 1
+    if m > 12:
+        m, y = 1, y + 1
+    return f"{y}-{m:02d}"
+
+
+def ipc_empalmado():
+    """Índice de precios mensual desde dic-2001 = 1: INDEC hasta 2006 y desde 2017, IPC San Luis 2007-2016."""
+    ind = {x["fecha"][:7]: x["valor"] for x in get_json(INFL_URL)}
+    sl = {r[0][:7]: r[1] for r in get_json(SERIES_URL.format(ids=IPC_SAN_LUIS))["data"] if r[1]}
+    idx, k = {"2001-12": 1.0}, "2001-12"
+    while True:
+        n = _mes_sig(k)
+        if "2007-01" <= n <= "2016-12":
+            if n not in sl or k not in sl:
+                break
+            r = sl[n] / sl[k]
+        else:
+            if n not in ind:
+                break
+            r = 1 + ind[n] / 100
+        idx[n] = idx[k] * r
+        k = n
+    return idx
+
+
+def promedio_mensual(puntos):
+    acc = {}
+    for f, v in puntos:
+        acc.setdefault(f[:7], []).append(v)
+    return {k: sum(v) / len(v) for k, v in acc.items()}
+
+
 def dia_habil_siguiente(d):
     d += dt.timedelta(days=1)
     while d.weekday() >= 5:
@@ -501,6 +574,45 @@ def main():
         inflacion["acumulado"] = {"valor": (nivel - 1) * 100, "anio": anio}
     except Exception as e:
         aviso(f"no se pudo traer la inflación ({e})")
+    # --- Históricos: dólar oficial y CCL ajustados por ITCRM, y Merval ajustado por inflación
+    historicos = {}
+    try:
+        itc = itcrm_mensual()
+        base = max(itc)
+        a3500 = []
+        for ini, fin in (("2012-12-01", "2019-12-31"), ("2020-01-01", hoy.isoformat())):
+            j = get_json(f"https://api.bcra.gob.ar/estadisticas/v4.0/Monetarias/{VAR_MAYORISTA}?desde={ini}&hasta={fin}&limit=3000")
+            a3500 += [(x["fecha"], float(x["valor"])) for x in j["results"][0]["detalle"]]
+        a_m = promedio_mensual(a3500)
+        ccl_m = promedio_mensual((x["fecha"], float(x["venta"])) for x in get_json(DOLARES_URL.format(casa="contadoconliqui")) if x.get("venta"))
+        factor = a_m[base] / itc[base]
+        serie_tcr = []
+        for m in sorted(k for k in itc if k >= "2001-12"):
+            of = itc[m] * factor
+            if m in ccl_m and m in a_m:
+                cc = of * ccl_m[m] / a_m[m]
+            elif m < "2011-11":  # sin cepo: el CCL coincidía con el oficial
+                cc = of
+            else:
+                cc = None
+            serie_tcr.append([m, round(of, 1), round(cc, 1) if cc else None])
+        historicos["tcr"] = {"base": base, "serie": serie_tcr}
+    except Exception as e:
+        aviso(f"no se pudo armar el dólar ajustado por ITCRM ({e})")
+    try:
+        ipc = ipc_empalmado()
+        ult = max(ipc)
+        r = get_json(MERVAL_URL)["chart"]["result"][0]
+        mv = {}
+        for t, c in zip(r["timestamp"], r["indicators"]["quote"][0]["close"]):
+            if c:
+                mv[dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%Y-%m")] = c
+        # meses sin IPC publicado todavía: se usa el último disponible
+        serie_m = [[m, round(v * ipc[ult] / ipc.get(m, ipc[ult]))] for m, v in sorted(mv.items()) if m >= "2001-12"]
+        historicos["merval"] = {"base": ult, "serie": serie_m}
+    except Exception as e:
+        aviso(f"no se pudo armar el Merval ajustado por inflación ({e})")
+
     alimentos = {}
     try:
         ids = [IPC_GBA] + [x[2] for x in ALIMENTOS]
@@ -526,6 +638,7 @@ def main():
         "mesInicial": a.mes,
         "dolar": dolar,
         "alimentos": alimentos,
+        "historicos": historicos,
         "escenarios": escenarios,
         "avisos": AVISOS,
         "inflacion": inflacion,
@@ -819,10 +932,22 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     </section>
   </div>
 
+  <section data-sec="fx" class="panel" id="ptcr">
+    <div class="phead"><h2 id="tcrt">Dólar oficial y CCL ajustados por ITCRM</h2></div>
+    <div class="chartbox" style="height:380px"><canvas id="c11" aria-label="Dólar oficial y contado con liquidación ajustados por tipo de cambio real multilateral desde 2001"></canvas></div>
+    <p class="n" id="ntcr" style="margin:8px 0 0"></p>
+  </section>
+
   <section data-sec="adrs" class="panel" id="padr">
     <div class="phead"><h2>ADRs argentinos en Nueva York</h2></div>
     <div class="tablewrap"><table class="mkt" id="tadr"></table></div>
     <p class="n" style="margin:8px 0 0">Precio en USD y variación porcentual (cierre o último precio disponible). Fuente: Yahoo Finance.</p>
+  </section>
+
+  <section data-sec="adrs" class="panel" id="pmerv">
+    <div class="phead"><h2 id="mervt">Merval ajustado por inflación desde diciembre 2001</h2></div>
+    <div class="chartbox" style="height:340px"><canvas id="c12" aria-label="Índice Merval ajustado por inflación desde diciembre de 2001"></canvas></div>
+    <p class="n" id="nmerv" style="margin:8px 0 0"></p>
   </section>
 
   <section data-sec="ipc" class="panel" id="alim">
@@ -1079,6 +1204,55 @@ function inflacion(){
 }
 inflacion();
 
+// Históricos: dólar real (ITCRM) y Merval real
+const PRESIDENTES=[["2002-01","DUHALDE"],["2003-05","N. KIRCHNER"],["2007-12","C. FERNÁNDEZ"],["2015-12","MACRI"],["2019-12","A. FERNÁNDEZ"],["2023-12","MILEI"]];
+const lineasVert={id:"lineasVert",afterDatasetsDraw(ch,_,o){const L=o&&o.marcas; if(!L) return; const {ctx,chartArea:a,scales:{x}}=ch;
+  ctx.save(); ctx.font='10px "IBM Plex Mono",monospace'; ctx.textAlign="left";
+  L.forEach(([idx,txt])=>{ if(idx<0) return; const px=x.getPixelForValue(idx); ctx.strokeStyle="#b36b00"; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(px,a.top); ctx.lineTo(px,a.bottom); ctx.stroke();
+    ctx.fillStyle="#ffb000"; ctx.fillText(txt,px+3,a.top+10); }); ctx.restore();}};
+const mesCorto=k=>{const[y,m]=k.split("-");return MESES[+m-1].slice(0,3)+"-"+y.slice(2);};
+let c11,c12;
+function historicos(){
+  const H=D.historicos||{}, m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  const T=H.tcr;
+  if(T&&T.serie.length){
+    const S=T.serie, L=S.map(x=>x[0]), of=S.map(x=>x[1]), cc=S.map(x=>x[2]);
+    const prom=a=>{const v=a.filter(x=>x!=null);return v.reduce((s,x)=>s+x,0)/v.length;};
+    const min17=Math.min(...S.filter(x=>x[0].startsWith("2017")).map(x=>x[1]));
+    const pba=S.filter(x=>x[0]>="2025-09"&&x[0]<="2025-10"&&x[2]!=null).map(x=>x[2]); const maxPBA=pba.length?Math.max(...pba):null;
+    const pO=prom(of), pC=prom(cc), cte=v=>L.map(()=>v);
+    const ref=(lbl,v,col)=>({label:lbl,data:cte(v),borderColor:col,borderDash:[5,4],borderWidth:1.3,pointRadius:0});
+    c11?.destroy();
+    c11=new Chart(document.getElementById("c11"),{type:"line",data:{labels:L.map(mesCorto),datasets:[
+      {label:"Dólar CCL",data:cc,borderColor:"#00d26a",borderWidth:1.8,pointRadius:0,spanGaps:false,tension:.15,order:2},
+      {label:"Dólar oficial",data:of,borderColor:"#ffb000",borderWidth:1.8,pointRadius:0,tension:.15,order:1},
+      ref("Mín. 2017",min17,"#ff3b3b"), ref("Prom. oficial",pO,"#3a8ee6"), ref("Prom. CCL",pC,"#ff9a3c"),
+      ...(maxPBA?[ref("Máx. tras elección PBA",maxPBA,"#b388ff")]:[])]},
+      options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
+        plugins:{lineasVert:{marcas:PRESIDENTES.map(([k,n])=>[L.indexOf(k),n])},legend:{labels:{color:m,boxWidth:12,font}},
+          tooltip:{callbacks:{label:it=>it.raw==null?null:`${it.dataset.label}: $ ${fmt(it.raw,0)}`}}},
+        scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:14,maxRotation:0}},y:{grid:{color:g},ticks:{color:m,font,callback:v=>"$ "+fmt(v)}}}},plugins:[lineasVert]});
+    const u=S[S.length-1];
+    document.getElementById("tcrt").textContent=`Dólar oficial y CCL ajustados por ITCRM (base ${mesCorto(T.base)})`;
+    document.getElementById("ntcr").textContent=`Cuánto valdría hoy cada dólar del pasado si se mantuviera el mismo tipo de cambio real multilateral. Último: oficial $ ${fmt(u[1],0)}, CCL $ ${u[2]?fmt(u[2],0):"s/d"}. Promedio desde 2001: oficial $ ${fmt(pO,0)}, CCL $ ${fmt(pC,0)}. Mínimo de 2017: $ ${fmt(min17,0)}. El CCL coincide con el oficial antes del cepo de nov-2011; entre nov-2011 y dic-2012 no hay datos. Fuentes: BCRA (ITCRM, A3500), ArgentinaDatos (CCL).`;
+  } else document.getElementById("ptcr").style.display="none";
+  const M=H.merval;
+  if(M&&M.serie.length){
+    const S=M.serie, L=S.map(x=>x[0]), v=S.map(x=>x[1]), med=v.reduce((a,b)=>a+b,0)/v.length;
+    c12?.destroy();
+    c12=new Chart(document.getElementById("c12"),{type:"line",data:{labels:L.map(mesCorto),datasets:[
+      {label:"Merval real",data:v,borderColor:"#3a8ee6",backgroundColor:"#3a8ee622",fill:true,borderWidth:1.8,pointRadius:0,tension:.15},
+      {label:"Media",data:L.map(()=>med),borderColor:"#00d26a",borderDash:[5,4],borderWidth:1.3,pointRadius:0}]},
+      options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
+        plugins:{lineasVert:{marcas:PRESIDENTES.map(([k,n])=>[L.indexOf(k),n])},legend:{labels:{color:m,boxWidth:12,font}},tooltip:{callbacks:{label:it=>`${it.dataset.label}: ${fmt(it.raw,0)}`}}},
+        scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:14,maxRotation:0}},y:{grid:{color:g},ticks:{color:m,font,callback:x=>fmt(x/1e6,1)+" M"}}}},plugins:[lineasVert]});
+    const u=v[v.length-1], mx=Math.max(...v), mxk=L[v.indexOf(mx)];
+    document.getElementById("mervt").textContent=`Merval ajustado por inflación desde diciembre 2001 (en puntos de ${mesCorto(M.base)})`;
+    document.getElementById("nmerv").textContent=`Hoy ${fmt(u,0)} puntos reales, ${fmt((u/med-1)*100,0)} % ${u>=med?"arriba":"abajo"} de la media (${fmt(med,0)}) y ${fmt((u/mx-1)*100,0)} % contra el máximo de ${mesCorto(mxk)}. Inflación: INDEC hasta 2006 y desde 2017; IPC de San Luis entre 2007 y 2016, cuando el INDEC estuvo intervenido. Fuentes: Yahoo Finance (S&P Merval), INDEC, datos.gob.ar.`;
+  } else document.getElementById("pmerv").style.display="none";
+}
+historicos();
+
 // Tablas de mercado
 function celda(v){
   if(v==null) return '<td class="pc">–</td>';
@@ -1207,7 +1381,7 @@ function render(){
 
 }
 document.querySelectorAll("[data-mode]").forEach(b=>b.onclick=()=>{mode=b.dataset.mode;document.querySelectorAll("[data-mode]").forEach(x=>x.setAttribute("aria-pressed",x===b));render();});
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();inflacion();});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();inflacion();});
 render();
 function avisos(){const A=D.avisos||[], el=document.getElementById("avisos"); el.innerHTML=A.length?`<section class="panel" style="border-color:var(--bad)"><div class="k" style="color:var(--bad)">Avisos de la última actualización</div><ul class="n" style="margin:6px 0 0;padding-left:18px">${A.map(a=>`<li>${a.replace(/</g,"&lt;")}</li>`).join("")}</ul></section>`:"";}
 avisos();
@@ -1237,7 +1411,7 @@ document.addEventListener("keydown",e=>{ if(e.target.tagName==="SELECT"||e.targe
 })();
 (function reloj(){const el=document.getElementById("clk"); const f=()=>{el.textContent=new Date().toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})+" ART";}; f(); setInterval(f,30000);})();
 // Redibuja cuando termina de cargar la tipografía, para que las etiquetas midan bien
-if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();inflacion();});
+if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();inflacion();});
 // Recarga la página cada 10 minutos para tomar la última versión generada
 setInterval(()=>{ if(!document.hidden) location.reload(); }, 10*60*1000);
 </script>
