@@ -441,7 +441,7 @@ PLANTILLA = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Tablero económico argentino</title>
-<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=Archivo+Narrow:wght@600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
 :root{--bg:#edf6f0;--panel:#ffffff;--panel2:#f2f9f4;--ink:#0f2419;--muted:#4f6b5c;--line:#d3e5d9;
@@ -543,23 +543,98 @@ td small{color:var(--muted);margin-left:6px}
 .tag{font-size:11px;font-weight:600;color:var(--res);border:1px solid var(--res);border-radius:4px;padding:0 4px;margin-left:6px}
 footer{font-size:12.5px;color:var(--muted)}
 @media (max-width:640px){.chartbox{height:300px}header{border-radius:0 0 14px 14px}}
+
+/* ===== Estilo terminal ===== */
+:root,:root:not([data-theme="light"]){--bg:#000;--panel:#070707;--panel2:#0f0f0f;--ink:#e8e8e8;--muted:#7c7c7c;--line:#262626;
+  --cur:#ffb000;--prev:#3a8ee6;--res:#ffb000;--risk:#ffb000;--fx:#ffb000;--tamar:#ffb000;--badlar:#ffb000;
+  --good:#00d26a;--bad:#ff3b3b;--goodbg:transparent;--badbg:transparent;--hdr1:#000;--hdr2:#000;--lbl:#5fb3ff;--amb:#ffb000;color-scheme:dark}
+body{background:#000;color:var(--ink);font:12.5px/1.4 "IBM Plex Mono",Consolas,"Courier New",monospace}
+.wrap{max-width:1500px;padding:0 8px 30px}
+header{background:#111;border-radius:0;margin:0 -8px;padding:6px 10px;border-bottom:1px solid var(--amb);display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px}
+.cmdk{background:var(--amb);color:#000;font-weight:700;padding:1px 8px}
+h1{font:700 14px "IBM Plex Mono",monospace;color:var(--amb);letter-spacing:.05em;margin:0}
+header .sub{color:#777;margin:0;font-size:12px}
+.hdr-r{margin-left:auto;display:flex;align-items:center;gap:8px;color:#9aa;font-size:12px}
+header select{background:#000;color:var(--amb);border:1px solid #444;border-radius:0;font:600 12px "IBM Plex Mono",monospace;padding:2px 6px}
+header select option{color:#fff;background:#000}
+.live{color:var(--good)}
+.fk{display:flex;flex-wrap:wrap;gap:2px;margin:0 -8px;padding:4px 8px;border-bottom:1px solid #222;background:#000}
+.fk button{background:#1c1c1c;color:#ddd;border:0;border-radius:0;padding:3px 10px;font:500 11.5px "IBM Plex Mono",monospace;cursor:pointer}
+.fk button b{color:var(--amb);margin-right:4px}
+.fk button[aria-pressed="true"]{background:var(--amb);color:#000}.fk button[aria-pressed="true"] b{color:#000}
+.tick{white-space:nowrap;overflow-x:auto;margin:0 -8px;padding:5px 10px;border-bottom:1px solid #222;background:#050505;color:#ccc;font-size:12px}
+.tick b{color:var(--amb);margin-right:4px}.tick span.t{margin-right:22px}
+.status{color:#777;font-size:11.5px;margin:6px 0 0}.status b{color:var(--ink)}
+.panel,.stat,.ind>div,.dol>div,.cmp,.cmp.neg{background:var(--panel)!important;border:1px solid var(--line)!important;border-radius:0!important;box-shadow:none}
+.ind>div,.dol>div{border-top:1px solid var(--line)!important;padding:8px 10px}
+.stat{border-top:1px solid var(--line)!important}
+.panel{padding:0 0 8px;margin-bottom:6px}
+.phead{background:#1a1300;margin:0 0 8px;padding:4px 10px;border-bottom:1px solid #2a2200}
+.phead h2,.cmp h2{font:700 11.5px "IBM Plex Mono",monospace;color:var(--amb);letter-spacing:.06em;text-transform:uppercase;margin:0}
+.panel>.chartbox,.panel>p,.panel>.tablewrap,.panel>.chips,.panel>.fstats,.panel>div:not(.phead){margin-left:10px;margin-right:10px}
+.k,.ind .k,.dol .k{font:500 11px "IBM Plex Mono",monospace;color:var(--lbl)!important;text-transform:uppercase;letter-spacing:.03em}
+.k i{border-radius:0}
+.v,.ind .v,.dol .v{font:700 19px "IBM Plex Mono",monospace;color:#fff}
+.n,.d,.ind .d,.dol .d{color:#888;font-size:11.5px}
+.pill{border-radius:0;background:transparent!important;padding:0;font-weight:600;color:#888}
+.pill.good{color:var(--good)}.pill.bad{color:var(--bad)}
+.up{color:var(--good)!important}.down{color:var(--bad)!important}
+.ind,.dol{gap:6px;margin-top:6px}.strip{gap:6px;margin:6px 0}
+.cmp{margin-top:6px;padding:8px 10px}
+.cmp .big{font:600 15px/1.4 "IBM Plex Mono",monospace;color:#fff}
+.cmp .rows{font-size:12px;color:#bbb}
+.seg{border-radius:0;border:1px solid #333;background:#000}
+.seg button{border-radius:0;padding:2px 9px;font:500 11px "IBM Plex Mono",monospace;color:#aaa}
+.seg button[aria-pressed="true"]{background:var(--amb)!important;color:#000}
+.chips button{border-radius:0;background:#1c1c1c;border:0;color:#ccc;font:500 11.5px "IBM Plex Mono",monospace}
+.chips button[aria-pressed="true"]{background:var(--amb);color:#000}
+.fstats div{background:#0f0f0f;border-radius:0}
+table{font-size:12px}
+th{color:var(--lbl)!important;font:500 11px "IBM Plex Mono",monospace;background:transparent!important;border-bottom:1px solid #222}
+td{border-bottom:0;padding:3px 10px}
+tbody tr:nth-child(even) td{background:#0d0d0d}
+.mkt td.t,.esc td:first-child{color:var(--amb);font-weight:600}
+.mkt td.nm{color:#999}
+.mkt td.pc{background:transparent!important}
+.mkt tr.grp td{background:#111!important;color:var(--amb);font-size:11px;letter-spacing:.05em;text-transform:uppercase}
+.esc .ud.pos,.esc .ud.neg{background:transparent}
+.esc tr.prob td.pv{background:transparent;color:var(--amb)}
+.rnt tr.tot td{background:#111}
+.tag{border-radius:0;color:var(--amb);border-color:var(--amb)}
+footer{color:#555;font-size:10.5px;margin-top:6px}
+select.nm{background:#000!important;color:var(--amb)!important;border:1px solid #444!important;border-radius:0!important;font:600 11px "IBM Plex Mono",monospace!important}
+[data-sec].oculto{display:none!important}
+.panel>p.n,.panel>p{padding:0 10px}
+.mkt td:nth-child(2),.esc td:nth-child(2n){color:#fff;font-weight:600}
+.duo{gap:0}
+@media (max-width:700px){.hdr-r{margin-left:0}header .sub{display:none}}
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
-    <div>
-      <h1>Tablero económico argentino</h1>
-      <p class="sub">BCRA y reservas, dólar, tasas, bonos, acciones y precios</p>
-    </div>
-    <div><label class="status" for="mes">Mes </label><select id="mes"></select></div>
+    <span class="cmdk">ARG</span>
+    <h1>TABLERO ECONÓMICO ARGENTINO &lt;GO&gt;</h1>
+    <span class="sub">BCRA | FX | TASAS | BONOS | ADRS | IPC</span>
+    <span class="hdr-r"><label for="mes">MES</label> <select id="mes"></select> <span id="clk"></span> <span class="live">● LIVE</span></span>
   </header>
+  <nav class="fk" id="fk" aria-label="Secciones">
+    <button type="button" data-tab="todo" aria-pressed="true"><b>1)</b>TODO</button>
+    <button type="button" data-tab="resumen" aria-pressed="false"><b>2)</b>RESUMEN</button>
+    <button type="button" data-tab="compras" aria-pressed="false"><b>3)</b>COMPRAS</button>
+    <button type="button" data-tab="reservas" aria-pressed="false"><b>4)</b>RESERVAS</button>
+    <button type="button" data-tab="fx" aria-pressed="false"><b>5)</b>FX/BANDAS</button>
+    <button type="button" data-tab="bonos" aria-pressed="false"><b>6)</b>BONOS</button>
+    <button type="button" data-tab="adrs" aria-pressed="false"><b>7)</b>ADRS</button>
+    <button type="button" data-tab="ipc" aria-pressed="false"><b>8)</b>IPC</button>
+  </nav>
+  <div class="tick" id="tick"></div>
   <p class="status" id="status"></p>
-  <section class="ind" id="ind" aria-label="Indicadores del día"></section>
-  <section class="dol" id="dol" aria-label="Dólar, bandas y brecha"></section>
-  <section class="cmp" id="cmp" aria-live="polite"></section>
-  <section class="strip" id="stats"></section>
-  <section class="panel">
+  <section data-sec="resumen" class="ind" id="ind" aria-label="Indicadores del día"></section>
+  <section data-sec="resumen fx" class="dol" id="dol" aria-label="Dólar, bandas y brecha"></section>
+  <section data-sec="resumen compras" class="cmp" id="cmp" aria-live="polite"></section>
+  <section data-sec="resumen compras" class="strip" id="stats"></section>
+  <section data-sec="compras" class="panel">
     <div class="phead">
       <h2 id="t1">Compras por rueda</h2>
       <div class="seg" role="group" aria-label="Modo del gráfico">
@@ -569,17 +644,17 @@ footer{font-size:12.5px;color:var(--muted)}
     </div>
     <div class="chartbox"><canvas id="c1"></canvas></div>
   </section>
-  <section class="panel">
+  <section data-sec="compras" class="panel">
     <div class="phead"><h2>Compras del BCRA por mes, últimos 12 meses</h2><span class="n" id="m12tot"></span></div>
     <div class="chartbox" style="height:320px"><canvas id="c6" aria-label="Compras netas de divisas del BCRA por mes en los últimos 12 meses"></canvas></div>
     <p class="n" id="m12n" style="margin:8px 0 0"></p>
   </section>
 
-  <section class="panel">
+  <section data-sec="reservas" class="panel">
     <div class="phead"><h2>Reservas internacionales brutas</h2></div>
     <div class="chartbox sm"><canvas id="c2"></canvas></div>
   </section>
-  <section class="panel">
+  <section data-sec="fx" class="panel">
     <div class="phead"><h2>Bandas cambiarias y dólar mayorista</h2>
       <div class="seg" role="group" aria-label="Período de bandas">
         <button type="button" data-b="90" aria-pressed="true">3 meses</button>
@@ -589,7 +664,7 @@ footer{font-size:12.5px;color:var(--muted)}
     <div class="chartbox sm" style="height:300px"><canvas id="c3" aria-label="Piso y techo de la banda cambiaria con el dólar mayorista"></canvas></div>
   </section>
 
-  <section class="panel">
+  <section data-sec="fx" class="panel">
     <div class="phead"><h2>Brecha CCL / MEP</h2>
       <div class="seg" role="group" aria-label="Período de la brecha">
         <button type="button" data-cm="90" aria-pressed="false">3 meses</button>
@@ -600,37 +675,37 @@ footer{font-size:12.5px;color:var(--muted)}
     <p class="n" id="ncm" style="margin:8px 0 0"></p>
   </section>
 
-  <section class="panel" id="pinf">
+  <section data-sec="ipc" class="panel" id="pinf">
     <div class="phead"><h2>Inflación mensual (INDEC)</h2><span class="n" id="infsub"></span></div>
     <div class="chartbox" style="height:300px"><canvas id="c8" aria-label="Inflación mensual del INDEC de los últimos 24 meses, con la interanual"></canvas></div>
   </section>
 
   <div class="duo">
-    <section class="panel" id="pk">
+    <section data-sec="bonos" class="panel" id="pk">
       <div class="phead"><h2>Escenarios: precio según probabilidad K</h2></div>
       <div class="tablewrap"><table class="esc" id="tesc"></table></div>
       <p class="n" id="nesc" style="margin:8px 0 0"></p>
     </section>
-    <section class="panel" id="rn">
+    <section data-sec="reservas" class="panel" id="rn">
       <div class="phead"><h2>Reservas netas y convertibilidad</h2></div>
       <div class="tablewrap"><table class="rnt" id="trn"></table></div>
       <p class="n" id="nrn" style="margin:8px 0 0"></p>
     </section>
   </div>
 
-  <section class="panel" id="pbon">
+  <section data-sec="bonos" class="panel" id="pbon">
     <div class="phead"><h2>Bonos soberanos en dólares (MEP)</h2></div>
     <div class="tablewrap"><table class="mkt" id="tbon"></table></div>
     <p class="n" style="margin:8px 0 0">Precio cada 100 nominales en USD MEP (especie D) y variación porcentual. Fuente: data912.</p>
   </section>
 
-  <section class="panel" id="padr">
+  <section data-sec="adrs" class="panel" id="padr">
     <div class="phead"><h2>ADRs argentinos en Nueva York</h2></div>
     <div class="tablewrap"><table class="mkt" id="tadr"></table></div>
     <p class="n" style="margin:8px 0 0">Precio en USD y variación porcentual (cierre o último precio disponible). Fuente: Yahoo Finance.</p>
   </section>
 
-  <section class="panel" id="alim">
+  <section data-sec="ipc" class="panel" id="alim">
     <div class="phead"><h2 id="t4">Precios de alimentos ajustados por inflación</h2>
       <div class="seg" role="group" aria-label="Valores" id="realnom">
         <button type="button" data-v="real" aria-pressed="true">Ajustado</button>
@@ -671,7 +746,7 @@ function inflCards(){
   const acum=F.acumulado&&F.acumulado.anio===anio?F.acumulado.valor:(M.filter(x=>x.mes.startsWith(anio)).reduce((f,x)=>f*(1+x.valor/100),1)-1)*100;
   const ia=(F.interanual||[]).slice(-1)[0];
   let pill="";
-  if(a){const d=u.valor-a.valor; pill=Math.abs(d)<0.005?`<span class="pill">Igual que ${mesTxt(a.mes)}</span>`:`<span class="pill ${d>0?"bad":"good"}">${d>0?"▲":"▼"} ${fmt(Math.abs(d),1)} pp vs ${mesTxt(a.mes)}</span>`;}
+  if(a){const d=u.valor-a.valor; pill=Math.abs(d)<0.005?`<span class="pill">Igual que ${mesTxt(a.mes)}</span>`:`<span class="pill ${d>0?"good":"bad"}">${d>0?"▲":"▼"} ${fmt(Math.abs(d),1)} pp vs ${mesTxt(a.mes)}</span>`;}
   return `<div style="--a:var(--bad)"><div class="k">IPC ${mesTxt(u.mes)} (INDEC)</div><div class="v">${fmt(u.valor,1)} %</div><div class="d">${ia?"Interanual "+fmt(ia.valor,1)+" %":""}</div>${pill}</div>`+
     `<div style="--a:var(--bad)" id="infn"><div class="k">IPC últimos <select class="nm" id="nmeses" aria-label="Cantidad de meses">${Array.from({length:12},(_,i)=>`<option value="${i+1}"${i===11?" selected":""}>${i+1}</option>`).join("")}</select> meses</div><div class="v" id="infnv">–</div><div class="d" id="infnd"></div></div>`+
     `<div style="--a:var(--bad)"><div class="k">IPC acumulado ${anio}</div><div class="v">${fmt(acum,1)} %</div><div class="d">Enero a ${mesTxt(u.mes)}</div></div>`;
@@ -702,7 +777,7 @@ function pintarUltimos(){
     const u=arr[arr.length-1], a=arr.length>1?arr[arr.length-2]:null;
     let d="";
     if(a){const x=u.valor-a.valor;
-      const c=x===0||bueno===null?"":((x>0)===bueno?"good":"bad");
+      const c=x===0?"":(x>0?"good":"bad");  // estilo terminal: color = dirección
       d=x===0?`<span class="pill">Sin cambios vs ${dmy(a.fecha).slice(0,5)}</span>`
         :`<span class="pill ${c}">${x>0?"▲":"▼"} ${fmt(Math.abs(x),dec)} ${unidad} vs ${dmy(a.fecha).slice(0,5)}</span>`;}
     return `<div style="--a:var(${acc})"><div class="k">${tit}</div><div class="v">${f(u.valor)}</div><div class="d">Al ${dmy(u.fecha).slice(0,5)}${u.prov?" (provisorio)":""}</div>${d}</div>`;};
@@ -731,14 +806,14 @@ function pintarUltimos(){
     let p="";
     if(y&&h.brecha!=null&&y.brecha!=null){const d=h.brecha-y.brecha;
       p=Math.abs(d)<0.005?`<span class="pill">Sin cambios vs ${dmy(y.fecha).slice(0,5)}</span>`
-        :`<span class="pill ${d>0?"bad":"good"}">${d>0?"▲":"▼"} ${fmt(Math.abs(d),2)} pp vs ${dmy(y.fecha).slice(0,5)}</span>`;}
+        :`<span class="pill ${d>0?"good":"bad"}">${d>0?"▲":"▼"} ${fmt(Math.abs(d),2)} pp vs ${dmy(y.fecha).slice(0,5)}</span>`;}
     return `<div style="--a:var(${acc})"><div class="k">${tit}</div><div class="v">${h.brecha!=null?fmt(h.brecha,1)+" %":"s/d"}</div><div class="d">$ ${fmt(h.precio,2)} al ${dmy(h.fecha).slice(0,5)}</div>${p}</div>`;};
   const B=X.brechas||{};
   let cm="";
   const CM=X.ccl_mep||[];
   if(CM.length){const h=CM[CM.length-1], y=CM.length>1?CM[CM.length-2]:null; let p="";
     if(y){const d=h.valor-y.valor; p=Math.abs(d)<0.005?`<span class="pill">Sin cambios vs ${dmy(y.fecha).slice(0,5)}</span>`
-      :`<span class="pill ${d>0?"bad":"good"}">${d>0?"▲":"▼"} ${fmt(Math.abs(d),2)} pp vs ${dmy(y.fecha).slice(0,5)}</span>`;}
+      :`<span class="pill ${d>0?"good":"bad"}">${d>0?"▲":"▼"} ${fmt(Math.abs(d),2)} pp vs ${dmy(y.fecha).slice(0,5)}</span>`;}
     cm=`<div style="--a:var(--badlar)"><div class="k">Brecha CCL / MEP</div><div class="v">${fmt(h.valor,2)} %</div><div class="d">CCL $ ${fmt(h.ccl,2)} · MEP $ ${fmt(h.mep,2)}</div>${p}</div>`;}
   el.innerHTML=br("Brecha MEP",B.mep,"--fx")+br("Brecha CCL",B.ccl,"--risk")+br("Brecha blue",B.blue,"--tamar")+cm;
 })();
@@ -752,7 +827,7 @@ function bandas(){
   if(bDias){const d=new Date(H.mayorista[H.mayorista.length-1].fecha);d.setDate(d.getDate()-bDias);desde=d.toISOString().slice(0,10);}
   const L=fechas.filter(f=>f>=desde), mp=a=>Object.fromEntries(a.map(x=>[x.fecha,x.valor]));
   const T=mp(H.techo),P=mp(H.piso),M=mp(H.mayorista);
-  const m=css("--muted"),g=css("--line"),font={family:"Archivo"};
+  const m=css("--muted"),g=css("--line"),font={family:"IBM Plex Mono",size:11};
   c3?.destroy();
   c3=new Chart(box,{type:"line",data:{labels:L.map(f=>dmy(f).slice(0,5)+(bDias&&bDias<=90?"":"/"+f.slice(2,4))),datasets:[
     {label:"Techo",data:L.map(f=>T[f]??null),borderColor:css("--bad"),borderWidth:2,borderDash:[6,4],pointRadius:0,spanGaps:true,fill:false},
@@ -778,14 +853,14 @@ function alimentos(){
   const hace=S.find(x=>x.fecha===shift(u.fecha.slice(0,7),-12)+"-01");
   const mx=S.reduce((a,b)=>b.real>a.real?b:a), mn=S.reduce((a,b)=>b.real<a.real?b:a);
   const prom=S.reduce((s,x)=>s+x.real,0)/S.length;
-  const pc=(a,b)=>{const p=(a/b-1)*100;return `<b class="${p<=0?"up":"down"}">${p>0?"+":""}${fmt(p,1)} %</b>`;};
+  const pc=(a,b)=>{const p=(a/b-1)*100;return `<b class="${p>=0?"up":"down"}">${p>0?"+":""}${fmt(p,1)} %</b>`;};
   document.getElementById("fstats").innerHTML=
     `<div><div class="k">Precio ${mes(u.fecha)}</div><div class="v">$ ${fmt(u.nominal,0)}</div></div>`+
     `<div><div class="k">Contra hace un año (real)</div><div class="v">${hace?pc(u.real,hace.real):"s/d"}</div></div>`+
     `<div><div class="k">Contra el promedio histórico</div><div class="v">${pc(u.real,prom)}</div></div>`+
     `<div><div class="k">Máximo real</div><div class="v">$ ${fmt(mx.real,0)}</div><div class="n">${mes(mx.fecha)}</div></div>`+
     `<div><div class="k">Mínimo real</div><div class="v">$ ${fmt(mn.real,0)}</div><div class="n">${mes(mn.fecha)}</div></div>`;
-  const m=css("--muted"),g=css("--line"),font={family:"Archivo"};
+  const m=css("--muted"),g=css("--line"),font={family:"IBM Plex Mono",size:11};
   c4?.destroy();
   c4=new Chart(document.getElementById("c4"),{type:"line",data:{labels:S.map(x=>mes(x.fecha)),
     datasets:[{label:A.productos[prod].nombre,data:v,borderColor:css("--cur"),backgroundColor:css("--cur")+"22",fill:true,borderWidth:2.5,pointRadius:0,tension:.2}]},
@@ -809,7 +884,7 @@ function cclmep(){
   let desde=S[0].fecha;
   if(cmDias){const d=new Date(S[S.length-1].fecha);d.setDate(d.getDate()-cmDias);desde=d.toISOString().slice(0,10);}
   const P=S.filter(x=>x.fecha>=desde), prom=P.reduce((a,x)=>a+x.valor,0)/P.length;
-  const m=css("--muted"),g=css("--line"),font={family:"Archivo"};
+  const m=css("--muted"),g=css("--line"),font={family:"IBM Plex Mono",size:11};
   c5?.destroy();
   c5=new Chart(box,{type:"line",data:{labels:P.map(x=>dmy(x.fecha).slice(0,5)+"/"+x.fecha.slice(2,4)),datasets:[
     {label:"Brecha CCL/MEP",data:P.map(x=>x.valor),borderColor:css("--cur"),backgroundColor:css("--cur")+"1f",fill:true,borderWidth:2,pointRadius:0,tension:.15},
@@ -832,7 +907,7 @@ function meses12(){
   const vals=ks.map(k=>Math.round(tot[k]*10)/10);
   let acc=0; const cum=vals.map(v=>Math.round((acc+=v)*10)/10);
   const mes=k=>{const[y,m]=k.split("-");return MESES[+m-1].slice(0,3)+" "+y.slice(2);};
-  const m=css("--muted"),g=css("--line"),font={family:"Archivo"};
+  const m=css("--muted"),g=css("--line"),font={family:"IBM Plex Mono",size:11};
   c6?.destroy();
   c6=new Chart(document.getElementById("c6"),{data:{labels:ks.map(k=>mes(k)+(k===ult?"*":"")),datasets:[
     {type:"bar",label:"Compras del mes",data:vals,yAxisID:"y",order:1,borderRadius:4,
@@ -855,7 +930,7 @@ meses12();
 let c8;
 function inflacion(){
   const F=D.inflacion||{}, M=(F.mensual||[]).slice(-24), IA=Object.fromEntries((F.interanual||[]).map(x=>[x.mes,x.valor]));
-  const m=css("--muted"),g=css("--line"),font={family:"Archivo"};
+  const m=css("--muted"),g=css("--line"),font={family:"IBM Plex Mono",size:11};
   const mes=k=>{const[y,mm]=k.split("-");return MESES[+mm-1].slice(0,3)+" "+y.slice(2);};
   if(M.length){
     const vals=M.map(x=>x.valor), ult=M.length-1;
@@ -964,7 +1039,7 @@ function render(){
   const acc=a=>{let t=0;return a.map(x=>t+=x.valor);};
   const val=a=>mode==="cum"?acc(a):a.map(x=>x.valor);
   const series=[[kP,P,"--prev"],[kC,C,"--cur"]];
-  const g=css("--line"),m=css("--muted"),font={family:"Archivo"};
+  const g=css("--line"),m=css("--muted"),font={family:"IBM Plex Mono",size:11};
   const base={responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
     plugins:{legend:{labels:{color:m,boxWidth:12,font}}},
     scales:{x:{grid:{display:false},ticks:{color:m,font}},y:{grid:{color:g},ticks:{color:m,font,callback:v=>fmt(v)+" M"}}}};
@@ -990,6 +1065,29 @@ render();
 function avisos(){const A=D.avisos||[], el=document.getElementById("avisos"); el.innerHTML=A.length?`<section class="panel" style="border-color:var(--bad)"><div class="k" style="color:var(--bad)">Avisos de la última actualización</div><ul class="n" style="margin:6px 0 0;padding-left:18px">${A.map(a=>`<li>${a.replace(/</g,"&lt;")}</li>`).join("")}</ul></section>`:"";}
 avisos();
 
+// Pestañas de funciones (estilo terminal)
+function verTab(t){
+  document.querySelectorAll("[data-sec]").forEach(el=>el.classList.toggle("oculto", t!=="todo" && !el.dataset.sec.split(" ").includes(t)));
+  document.querySelectorAll("#fk button").forEach(b=>b.setAttribute("aria-pressed", b.dataset.tab===t));
+  window.scrollTo(0,0);
+}
+document.querySelectorAll("#fk button").forEach(b=>b.onclick=()=>{verTab(b.dataset.tab); history.replaceState(null,"",b.dataset.tab==="todo"?location.pathname:"#"+b.dataset.tab);});
+document.addEventListener("keydown",e=>{ if(e.target.tagName==="SELECT"||e.target.tagName==="INPUT") return; const n=+e.key; const bs=[...document.querySelectorAll("#fk button")]; if(n>=1&&n<=bs.length) bs[n-1].click(); });
+{const h=location.hash.slice(1); if(h&&document.querySelector(`#fk button[data-tab="${h}"]`)) verTab(h);}
+// Cinta de cotizaciones
+(function cinta(){
+  const I=D.indicadores||{}, X=D.dolar||{}, it=[];
+  const ult=a=>a&&a.length?a[a.length-1]:null, pre=a=>a&&a.length>1?a[a.length-2]:null;
+  const chg=(u,p,dec,suf="")=>{if(!u||!p) return ""; const d=u.valor-p.valor; return `<span class="${d>0?"up":d<0?"down":""}">${d>0?"+":""}${fmt(d,dec)}${suf}</span>`;};
+  const add=(n,a,dec)=>{const u=ult(a); if(u) it.push(`<span class="t"><b>${n}</b>${fmt(u.valor,dec)} ${chg(u,pre(a),dec)}</span>`);};
+  add("RES",I.reservas,0); add("EMBI",I.riesgo,0); add("A3500",X.mayorista,2); add("MINOR",I.minorista,2); add("TAMAR",I.tamar,2); add("BADLAR",I.badlar,2);
+  const B=X.brechas||{}; const cc=ult(B.ccl), mp=ult(B.mep), bl=ult(B.blue);
+  if(mp) it.push(`<span class="t"><b>MEP</b>${fmt(mp.precio,2)}</span>`); if(cc) it.push(`<span class="t"><b>CCL</b>${fmt(cc.precio,2)}</span>`); if(bl) it.push(`<span class="t"><b>BLUE</b>${fmt(bl.precio,2)}</span>`);
+  (D.bonos||[]).forEach(g=>g.filas.filter(r=>["AL30","GD30","GD35","GD38"].includes(r.t)).forEach(r=>it.push(`<span class="t"><b>${r.t}</b>${fmt(r.precio,2)} <span class="${r.d1>0?"up":r.d1<0?"down":""}">${r.d1!=null?(r.d1>0?"+":"")+fmt(r.d1,2)+"%":""}</span></span>`)));
+  (D.adrs||[]).filter(r=>["GGAL","YPF","PAM","BMA"].includes(r.t)).forEach(r=>it.push(`<span class="t"><b>${r.t}</b>${fmt(r.precio,2)} <span class="${r.d1>0?"up":r.d1<0?"down":""}">${r.d1!=null?(r.d1>0?"+":"")+fmt(r.d1,2)+"%":""}</span></span>`));
+  document.getElementById("tick").innerHTML=it.join("");
+})();
+(function reloj(){const el=document.getElementById("clk"); const f=()=>{el.textContent=new Date().toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})+" ART";}; f(); setInterval(f,30000);})();
 // Redibuja cuando termina de cargar la tipografía, para que las etiquetas midan bien
 if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();inflacion();});
 // Recarga la página cada 10 minutos para tomar la última versión generada
