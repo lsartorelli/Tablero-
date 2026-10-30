@@ -161,6 +161,7 @@ def main():
     ap.add_argument("--riesgo", type=float, help="Riesgo país del día (puntos); usa la fecha de --cargar o la de hoy")
     ap.add_argument("--borrar", metavar="FECHA", help="Borra un dato cargado a mano")
     ap.add_argument("--no-abrir", action="store_true", help="No abrir el navegador")
+    ap.add_argument("--salida", help="Ruta del HTML a generar (por defecto grafico_bcra.html en esta carpeta)")
     a = ap.parse_args()
 
     manuales = leer_manuales()
@@ -385,14 +386,16 @@ def main():
                         {"reservas": reservas, "riesgo": mezclar(rp, "riesgo", extras), "minorista": tc, "tamar": tamar, "badlar": badlar}.items()},
     }
 
-    with open(SALIDA, "w", encoding="utf-8") as f:
+    salida = os.path.abspath(a.salida) if a.salida else SALIDA
+    os.makedirs(os.path.dirname(salida), exist_ok=True)
+    with open(salida, "w", encoding="utf-8") as f:
         f.write(PLANTILLA.replace("/*__DATOS__*/null", json.dumps(datos, ensure_ascii=False)))
 
     pend = [m["fecha"] for m in extras if m["fecha"] not in {x["fecha"] for x in api_c}]
     print(f"Datos oficiales hasta {api_c[-1]['fecha']}" + (f"; provisorios: {', '.join(sorted(set(pend)))}" if pend else ""))
-    print(f"Gráfico generado: {SALIDA}")
+    print(f"Gráfico generado: {salida}")
     if not a.no_abrir:
-        webbrowser.open("file://" + SALIDA.replace("\\", "/"))
+        webbrowser.open("file://" + salida.replace("\\", "/"))
 
 
 PLANTILLA = r"""<!DOCTYPE html>
@@ -881,6 +884,8 @@ function render(){
 document.querySelectorAll("[data-mode]").forEach(b=>b.onclick=()=>{mode=b.dataset.mode;document.querySelectorAll("[data-mode]").forEach(x=>x.setAttribute("aria-pressed",x===b));render();});
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();});
 render();
+// Recarga la página cada 10 minutos para tomar la última versión generada
+setInterval(()=>{ if(!document.hidden) location.reload(); }, 10*60*1000);
 </script>
 </body>
 </html>"""
