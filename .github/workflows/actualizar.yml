@@ -38,6 +38,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Instalar dependencias
+        run: pip install xlrd
+
       - name: Generar tablero
         run: |
           ARGS="--no-abrir --salida docs/index.html"
