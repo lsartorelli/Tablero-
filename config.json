@@ -1,0 +1,52 @@
+{
+  "escenarios": {
+    "_ayuda": "precio_0 y precio_100 son tus precios objetivo con 0 % y 100 % de probabilidad. fuente: bono (data912, precio en USD MEP), yahoo (ticker de Yahoo Finance) o merval_usd (Merval / CCL).",
+    "filas": [
+      0,
+      10,
+      20,
+      30,
+      40,
+      100
+    ],
+    "activos": [
+      {
+        "nombre": "GD38",
+        "fuente": "bono",
+        "simbolo": "GD38D",
+        "precio_0": 85.18,
+        "precio_100": 45.0
+      },
+      {
+        "nombre": "GD35",
+        "fuente": "bono",
+        "simbolo": "GD35D",
+        "precio_0": 82.76,
+        "precio_100": 45.0
+      },
+      {
+        "nombre": "Merval USD",
+        "fuente": "merval_usd",
+        "simbolo": "^MERV",
+        "precio_0": 2380,
+        "precio_100": 475
+      }
+    ]
+  },
+  "reservas_netas": {
+    "_ayuda": "bis_mult_sedesa y la fecha salen del balance semanal del BCRA; actualizalos a mano. oro_onzas_millones: tenencia de oro del BCRA en millones de onzas troy.",
+    "swap_cnh_millones": 130000,
+    "bis_mult_sedesa": 2611,
+    "bis_fecha": "2026-10-07",
+    "oro_onzas_millones": 1.98,
+    "base": {
+      "fecha": "2023-12-31",
+      "brutas": 23071,
+      "encajes": 9303,
+      "swap": 18237,
+      "bis": 4924,
+      "oro": 4099,
+      "base_monetaria": 35171884
+    }
+  }
+}
