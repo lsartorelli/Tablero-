@@ -536,6 +536,102 @@ def serie(var_id, desde):
     return sorted(({"fecha": x["fecha"], "valor": float(x["valor"])} for x in det), key=lambda x: x["fecha"])
 
 
+# ---------- Compras del día y reservas leídas de las noticias ----------
+PRENSA_ARCHIVO = os.path.join(BASE, "datos_prensa.json")
+PRENSA_FEEDS = ["https://www.ambito.com/rss/pages/finanzas.xml", "https://www.ambito.com/rss/pages/economia.xml",
+                "https://www.infobae.com/arc/outboundfeeds/rss/category/economia/",
+                "https://www.lanacion.com.ar/arc/outboundfeeds/rss/category/economia/", "https://eleconomista.com.ar/feed/"]
+
+
+def _texto_url(u):
+    import html as _h, re as _re
+    s = get_bytes(u).decode("utf-8", "ignore")
+    s = _re.sub(r"<script.*?</script>|<style.*?</style>", " ", s, flags=_re.S)
+    return _re.sub(r"\s+", " ", _h.unescape(_re.sub("<[^>]+>", " ", s)))
+
+
+def datos_de_prensa(fechas_buscadas):
+    """Busca en notas de medios la compra diaria del BCRA y las reservas de cierre de cada fecha.
+    Solo acepta un número si al menos dos medios distintos coinciden."""
+    import html as _h, re as _re, email.utils
+    from collections import Counter
+    if not fechas_buscadas:
+        return {}
+    cur = r"(?:US\$|USD|U\$S|u\$s)\s?"
+    pat_c = _re.compile(r"(?:compr[óo]|adquiri[óo]|sum[óo]|compras (?:netas )?(?:por|de))\s*(?:otros\s*)?" + cur +
+                        r"([\d\.,]+)\s*millones(.{0,60})", _re.I)
+    excl = _re.compile(r"^\s*(?:en (?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre|"
+                       r"el mes|la semana|lo que va|el año|el acumulado|las últimas)|durante|acumulad|desde|entre|y el Tesoro)", _re.I)
+    pat_r = _re.compile(r"reservas(?: brutas| internacionales)?[^.]{0,80}?(?:terminaron|cerraron|quedaron|finalizaron|se ubicaron|"
+                        r"llegaron|alcanzaron)[^.]{0,30}?" + cur + r"([\d\.]{5,7})\s*millones", _re.I)
+    pat_r2 = _re.compile(r"(?:reservas|stock bruto)[^.]{0,80}?(?:cay[óo]|cayeron|bajaron|subieron|aumentaron|crecieron|retrocedieron)"
+                         r"[^.]{0,60}?(?:hasta|a)\s" + cur + r"([\d\.]{5,7})\s*millones", _re.I)
+    hallazgos = {f: {"compra": [], "reservas": []} for f in fechas_buscadas}
+    vistos = set()
+    for feed in PRENSA_FEEDS:
+        try:
+            xml = get_bytes(feed).decode("utf-8", "ignore")
+        except Exception:
+            continue
+        medio = feed.split("/")[2].replace("www.", "")
+        for it in _re.findall(r"<item>(.*?)</item>", xml, _re.S):
+            mt = _re.search(r"<title>(.*?)</title>", it, _re.S)
+            tit = _re.sub(r"<!\[CDATA\[|\]\]>", "", mt.group(1)) if mt else ""
+            tit = _h.unescape(_re.sub(r"<[^>]+>", "", tit))
+            if not _re.search(r"(BCRA|Banco Central)", tit) or not _re.search(r"compr|reservas", tit, _re.I):
+                continue
+            link = _re.search(r"<link>(.*?)</link>", it, _re.S)
+            fecha = _re.search(r"<pubDate>(.*?)</pubDate>", it)
+            if not link or not fecha:
+                continue
+            link = _re.sub(r"<!\[CDATA\[|\]\]>", "", link.group(1)).strip()
+            if link in vistos:
+                continue
+            vistos.add(link)
+            pub = email.utils.parsedate_to_datetime(fecha.group(1)).astimezone(dt.timezone(dt.timedelta(hours=-3)))
+            dia = pub.date()
+            if pub.hour < 12:  # nota de la mañana: habla de la rueda anterior
+                dia -= dt.timedelta(days=1)
+                while dia.weekday() >= 5:
+                    dia -= dt.timedelta(days=1)
+            f = dia.isoformat()
+            if f not in hallazgos:
+                continue
+            try:
+                t = _texto_url(link)
+            except Exception:
+                continue
+            val = None
+            for m in pat_c.finditer(t):
+                if not excl.search(m.group(2)):
+                    v = float(m.group(1).replace(".", "").replace(",", "."))
+                    if v <= 1000:
+                        val = v
+                        break
+            if val is None and _re.search(r"no compr[óo]", tit, _re.I):
+                val = 0.0
+            if val is not None:
+                hallazgos[f]["compra"].append((medio, val))
+            mr = pat_r.search(t) or pat_r2.search(t)
+            if mr:
+                rv = float(mr.group(1).replace(".", ""))
+                if 20000 < rv < 150000:
+                    hallazgos[f]["reservas"].append((medio, rv))
+    out = {}
+    for f, h in hallazgos.items():
+        fila = {}
+        for campo in ("compra", "reservas"):
+            por_medio = {}
+            for medio, v in h[campo]:
+                por_medio.setdefault(medio, v)  # primera mención de cada medio
+            c = Counter(por_medio.values()).most_common(1)
+            if c and c[0][1] >= 2:
+                fila[campo] = c[0][0]
+        if fila:
+            out[f] = fila
+    return out
+
+
 def leer_manuales():
     try:
         with open(MANUAL, encoding="utf-8") as f:
@@ -1002,7 +1098,31 @@ def main():
         alimentos = {"base": base_mes, "productos": alimentos}
     except Exception as e:
         aviso(f"no se pudieron traer los precios de alimentos ({e})")
-    extras = SEED + manuales
+    # Compras y reservas del día desde las noticias (para los días que la API todavía no publicó)
+    try:
+        with open(PRENSA_ARCHIVO, encoding="utf-8") as f:
+            prensa = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        prensa = {}
+    try:
+        ult_api = api_c[-1]["fecha"]
+        buscar, d = [], dt.date.fromisoformat(ult_api) + dt.timedelta(days=1)
+        while d <= hoy:
+            if d.weekday() < 5 and not (d.isoformat() in prensa and "compra" in prensa[d.isoformat()] and "reservas" in prensa[d.isoformat()]):
+                buscar.append(d.isoformat())
+            d += dt.timedelta(days=1)
+        nuevos = datos_de_prensa(buscar)
+        for f, fila in nuevos.items():
+            prensa.setdefault(f, {}).update(fila)
+        prensa = {f: v for f, v in prensa.items() if f > (hoy - dt.timedelta(days=60)).isoformat()}
+        with open(PRENSA_ARCHIVO, "w", encoding="utf-8") as f:
+            json.dump(dict(sorted(prensa.items())), f, ensure_ascii=False, indent=1)
+        if nuevos:
+            print("Datos de prensa:", nuevos)
+    except Exception as e:
+        aviso(f"no se pudieron leer las noticias del día ({e})")
+    extras_prensa = [{"fecha": f, "compra": v.get("compra"), "reservas": v.get("reservas")} for f, v in sorted(prensa.items())]
+    extras = SEED + extras_prensa + manuales  # lo cargado a mano tiene prioridad sobre la prensa
     compras = mezclar(api_c, "compra", extras)
     reservas = mezclar(api_r, "reservas", extras)
     datos = {
