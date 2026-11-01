@@ -189,12 +189,35 @@ def get_bytes(url):
 
 
 BRASIL = {}  # tipo de cambio real bilateral con Brasil (ITCRB), lo completa itcrm_mensual()
+ITCRM_BYTES = None
+
+
+def itcrb_diario():
+    """ITCRB Brasil diario (hoja de datos diarios del mismo Excel), solo días hábiles."""
+    import io, re as _re, zipfile
+    z = zipfile.ZipFile(io.BytesIO(ITCRM_BYTES or get_bytes(ITCRM_URL)))
+    wb = z.read("xl/workbook.xml").decode("utf-8")
+    rels = dict(_re.findall(r'Id="(rId\d+)"[^>]*Target="([^"]+)"', z.read("xl/_rels/workbook.xml.rels").decode("utf-8")))
+    rid = next(r for n, r in _re.findall(r'<sheet [^>]*name="([^"]+)"[^>]*r:id="([^"]+)"', wb) if "mens" not in n.lower() and "ITCRM" in n)
+    xml = z.read("xl/" + rels[rid].lstrip("/").replace("xl/", "")).decode("utf-8")
+    out = []
+    for fila in _re.findall(r"<row [^>]*>(.*?)</row>", xml, _re.S):
+        c = dict(_re.findall(r'<c r="([A-Z]+)\d+"[^>]*?(?:/>|>(?:<f>.*?</f>)?<v>([^<]*)</v>)', fila))
+        try:
+            f = dt.date(1899, 12, 30) + dt.timedelta(days=int(float(c["A"])))
+            if f.year >= 1997 and f.weekday() < 5:
+                out.append((f.isoformat(), float(c["C"])))
+        except (KeyError, ValueError):
+            pass
+    return out
 
 
 def itcrm_mensual():
     """Lee la hoja de promedios mensuales del Excel del BCRA sin librerías externas."""
     import io, re as _re, zipfile
-    z = zipfile.ZipFile(io.BytesIO(get_bytes(ITCRM_URL)))
+    global ITCRM_BYTES
+    ITCRM_BYTES = get_bytes(ITCRM_URL)
+    z = zipfile.ZipFile(io.BytesIO(ITCRM_BYTES))
     wb = z.read("xl/workbook.xml").decode("utf-8")
     rels = dict(_re.findall(r'Id="(rId\d+)"[^>]*Target="([^"]+)"', z.read("xl/_rels/workbook.xml.rels").decode("utf-8")))
     rid = next(r for n, r in _re.findall(r'<sheet [^>]*name="([^"]+)"[^>]*r:id="([^"]+)"', wb) if "mens" in n.lower())
@@ -340,6 +363,27 @@ def personas_humanas(hoy):
     return sorted(datos.items())
 
 
+# ---------- Patentamientos (inscripciones iniciales, DNRPA) ----------
+DNRPA_PAQUETES = {"autos": "estadistica-de-tramites-de-automotores", "motos": "estadistica-de-tramites-de-motovehiculos"}
+
+
+def patentamientos():
+    """Totales mensuales de inscripciones iniciales de autos y motos. El CSV cambia de nombre cada mes,
+    así que se busca en el catálogo de datos abiertos de Justicia."""
+    import csv, io
+    out = {}
+    for clave, paquete in DNRPA_PAQUETES.items():
+        pk = get_json(f"https://datos.jus.gob.ar/api/3/action/package_show?id={paquete}")["result"]
+        rec = next(r for r in pk["resources"] if r["name"].lower().startswith("estadística de inscripciones iniciales")
+                   and r["url"].endswith(".csv"))
+        tot = {}
+        for x in csv.DictReader(io.StringIO(get_bytes(rec["url"]).decode("utf-8-sig"))):
+            k = f"{int(x['anio_inscripcion_inicial'])}-{int(x['mes_inscripcion_inicial']):02d}"
+            tot[k] = tot.get(k, 0) + int(float(x["cantidad_inscripciones_iniciales"] or 0))
+        out[clave] = sorted(tot.items())
+    return out
+
+
 # ---------- Semáforo de actividad ----------
 # (grupo, nombre, fuente, id, desestacionalizada, deflactar por IPC)
 SEMAFORO = [
@@ -353,6 +397,8 @@ SEMAFORO = [
     ("Industria", "Alimentos y bebidas", "ds", "453.2_ALIMENTOS_DAS_0_0_17_18", False, False),
     ("Consumo", "Confianza del consumidor (UTDT)", "ds", "380.3_ICC_NACIONNAL_0_T_12", True, False),
     ("Consumo", "Recaudación DGI (real)", "ds", "172.3_SOTAL_DDGI_M_0_0_12", False, True),
+    ("Consumo", "Patentamiento de autos", "extra", "autos", False, False),
+    ("Consumo", "Patentamiento de motos", "extra", "motos", False, False),
     ("Crédito", "Préstamos en $ al sector privado (real)", "bcra", [117], True, True),
     ("Crédito", "Préstamos al consumo (real)", "bcra", [114, 115], True, True),
     ("Crédito", "Préstamos comerciales (real)", "bcra", [110, 111], True, True),
@@ -362,7 +408,7 @@ SEMAFORO = [
 ]
 
 
-def semaforo(hoy, infl_mensual):
+def semaforo(hoy, infl_mensual, extra=None):
     desde = f"{hoy.year - 3}-01-01"
     ids = [x[3] for x in SEMAFORO if x[2] == "ds"]
     j = get_json(SERIES_URL.format(ids=",".join(ids + ["148.3_INIVELNAL_DICI_M_26"])) + f"&start_date={desde}")
@@ -377,6 +423,8 @@ def semaforo(hoy, infl_mensual):
         try:
             if fuente == "ds":
                 s_ = serie_ds.get(sid, {})
+            elif fuente == "extra":
+                s_ = dict((extra or {}).get(sid, []))
             else:  # stock diario de préstamos -> promedio mensual, solo meses completos
                 tot = {}
                 for var in sid:
@@ -783,6 +831,40 @@ def main():
             historicos["mep_brasil"] = {"base": base_b, "serie": sb}
         except Exception as e:
             aviso(f"no se pudo armar el MEP real contra Brasil ({e})")
+        # Real brasileño a precios de hoy: ITCRB diario llevado al precio actual del real en pesos
+        try:
+            d_itcrb = itcrb_diario()
+            f_ult, v_ult = d_itcrb[-1]
+            a_dia = dict((x["fecha"], x["valor"]) for x in may)
+            fx = get_json(f"https://api.frankfurter.app/{(dt.date.fromisoformat(f_ult) - dt.timedelta(days=7)).isoformat()}..?from=USD&to=BRL")["rates"]
+            brl = {f: v["BRL"] for f, v in fx.items()}
+            def ars_brl(f):  # pesos por real = A3500 / reales por dólar (último dato disponible a esa fecha)
+                fa = max((k for k in a_dia if k <= f), default=None)
+                fb = max((k for k in brl if k <= f), default=None)
+                return a_dia[fa] / brl[fb] if fa and fb else None
+            # Durante los cepos se usa el dólar de mercado (MEP o, antes de 2018, CCL) en lugar del oficial
+            a_d = dict(a3500)
+            a_d.update(a_dia)
+            mep_d = {x["fecha"]: float(x["venta"]) for x in get_json(DOLARES_URL.format(casa="bolsa")) if x.get("venta")}
+            ccl_d = {x["fecha"]: float(x["venta"]) for x in get_json(DOLARES_URL.format(casa="contadoconliqui")) if x.get("venta")}
+            def brecha(f):
+                if f < "2011-11-01" or ("2015-12-17" <= f < "2019-09-01"):
+                    return 1.0  # sin cepo
+                fa = max((k for k in a_d if k <= f), default=None)
+                mk = mep_d.get(f) or ccl_d.get(f)
+                return mk / a_d[fa] if mk and fa else 1.0
+            ref = ars_brl(f_ult) * brecha(f_ult)
+            b_ult = brecha(f_ult)
+            serie_r = [[f, round(v * (ref / b_ult) / v_ult * brecha(f), 2)] for f, v in d_itcrb]
+            recientes = []
+            for f in sorted(set(a_dia) | set(brl)):
+                if f > f_ult and dt.date.fromisoformat(f).weekday() < 5:
+                    x = ars_brl(f)
+                    if x:
+                        recientes.append([f, round(x * brecha(f), 2)])
+            historicos["real_brasil"] = {"serie": serie_r + recientes, "ult_itcrb": f_ult}
+        except Exception as e:
+            aviso(f"no se pudo armar el real brasileño a precios de hoy ({e})")
     except Exception as e:
         aviso(f"no se pudo armar el dólar ajustado por ITCRM ({e})")
     try:
@@ -870,7 +952,12 @@ def main():
         aviso(f"no se pudo armar la serie de compras de personas humanas ({e})")
 
     try:
-        sem = semaforo(hoy, inflacion.get("mensual", []))
+        patent = patentamientos()
+    except Exception as e:
+        patent = {}
+        aviso(f"no se pudieron traer los patentamientos ({e})")
+    try:
+        sem = semaforo(hoy, inflacion.get("mensual", []), patent)
     except Exception as e:
         sem = []
         aviso(f"no se pudo armar el semáforo de actividad ({e})")
@@ -918,6 +1005,7 @@ def main():
         "historicos": historicos,
         "escenarios": escenarios,
         "semaforo": sem,
+        "patentamientos": {k: v[-60:] for k, v in patent.items()},
         "avisos": AVISOS,
         "inflacion": inflacion,
         "bonos": bonos,
@@ -1200,6 +1288,17 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <p class="n" id="ncm" style="margin:8px 0 0"></p>
   </section>
 
+  <section data-sec="actividad" class="panel" id="ppat">
+    <div class="phead"><h2 id="patt">Patentamientos</h2>
+      <div class="seg" role="group" aria-label="Vehículo">
+        <button type="button" data-pat="autos" aria-pressed="true">Autos</button>
+        <button type="button" data-pat="motos" aria-pressed="false">Motos</button>
+      </div></div>
+    <div class="gobs" id="patcards"></div>
+    <div class="chartbox" style="height:320px"><canvas id="c20" aria-label="Patentamientos mensuales del año actual contra el año anterior"></canvas></div>
+    <p class="n" id="npat" style="margin:8px 0 0"></p>
+  </section>
+
   <section data-sec="actividad" class="panel" id="pserv">
     <div class="phead"><h2>Ingreso de dólares por servicios y turismo (suma de 12 meses)</h2>
       <div class="seg" role="group" aria-label="Serie">
@@ -1258,6 +1357,18 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <div class="phead"><h2 id="tcrt">Dólar oficial y CCL ajustados por ITCRM</h2></div>
     <div class="chartbox" style="height:380px"><canvas id="c11" aria-label="Dólar oficial y contado con liquidación ajustados por tipo de cambio real multilateral desde 2001"></canvas></div>
     <p class="n" id="ntcr" style="margin:8px 0 0"></p>
+  </section>
+
+  <section data-sec="fx" class="panel" id="preal">
+    <div class="phead"><h2>Real brasileño a precios de hoy (ITCRB Brasil)</h2>
+      <div class="seg" role="group" aria-label="Período">
+        <button type="button" data-rb="0" aria-pressed="true">Desde 1997</button>
+        <button type="button" data-rb="10" aria-pressed="false">10 años</button>
+        <button type="button" data-rb="2" aria-pressed="false">2 años</button>
+      </div></div>
+    <div class="gobs" id="realcards" style="grid-template-columns:repeat(5,minmax(0,1fr))"></div>
+    <div class="chartbox" style="height:380px"><canvas id="c21" aria-label="Precio del real brasileño en pesos a precios de hoy desde 1997"></canvas></div>
+    <p class="n" id="nreal" style="margin:8px 0 0"></p>
   </section>
 
   <section data-sec="fx" class="panel" id="pmepbr">
@@ -1692,6 +1803,75 @@ function salarios(){
 }
 document.querySelectorAll("[data-sal]").forEach(b=>b.onclick=()=>{salVista=b.dataset.sal;document.querySelectorAll("[data-sal]").forEach(x=>x.setAttribute("aria-pressed",x===b));salarios();});
 
+// Real brasileño a precios de hoy
+let c21, rbAnios=0;
+function realBrasil(){
+  const R=(D.historicos||{}).real_brasil, panel=document.getElementById("preal");
+  if(!R||!R.serie.length){panel.style.display="none";return;}
+  let S=R.serie; const u=S[S.length-1];
+  if(rbAnios){const d=new Date(u[0]);d.setFullYear(d.getFullYear()-rbAnios);const f=d.toISOString().slice(0,10);S=S.filter(x=>x[0]>=f);}
+  const L=S.map(x=>x[0]), V=S.map(x=>x[1]), m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  // estadísticas del período elegido
+  const ord=[...V].sort((a,b)=>a-b), q=p=>ord[Math.min(ord.length-1,Math.floor(p*(ord.length-1)))];
+  const prom=V.reduce((a,b)=>a+b,0)/V.length, med=q(.5), p25=q(.25), p75=q(.75);
+  const pctil=ord.filter(x=>x<=u[1]).length/ord.length*100;
+  const mn=S.reduce((a,b)=>b[1]<a[1]?b:a), mx=S.reduce((a,b)=>b[1]>a[1]?b:a);
+  const est=pctil<25?["BARATO","#00d26a"]:pctil>75?["CARO","#ff3b3b"]:["EN LA MEDIA","#ffb000"];
+  const per=rbAnios?`ÚLTIMOS ${rbAnios} AÑOS`:"DESDE 1997";
+  const vs=(a,b)=>{const d=(a/b-1)*100;return `${d>0?"+":""}${fmt(d,0)} %`;};
+  document.getElementById("realcards").innerHTML=
+    `<div style="--c:${est[1]}"><div class="nm">HOY · ${dmy(u[0])}</div><div class="pc">$ ${fmt(u[1],0)}</div><div class="ab" style="color:${est[1]}">${est[0]}</div></div>`+
+    `<div style="--c:#ffb000"><div class="nm">VS PROMEDIO</div><div class="pc">${vs(u[1],prom)}</div><div class="rg">promedio $ ${fmt(prom,0)}</div></div>`+
+    `<div style="--c:#ffffff"><div class="nm">VS MEDIANA</div><div class="pc">${vs(u[1],med)}</div><div class="rg">mediana $ ${fmt(med,0)}</div></div>`+
+    `<div style="--c:#3a8ee6"><div class="nm">PERCENTIL</div><div class="pc">${fmt(pctil,0)}</div><div class="rg">el ${fmt(pctil,0)} % de los días fue igual o más barato</div></div>`+
+    `<div style="--c:#777"><div class="nm">RANGO ${per}</div><div class="pc" style="font-size:18px">$ ${fmt(mn[1],0)} – ${fmt(mx[1],0)}</div><div class="rg">mín ${dmy(mn[0])} · máx ${dmy(mx[0])}</div></div>`;
+  const cte=v=>L.map(()=>v);
+  c21?.destroy();
+  c21=new Chart(document.getElementById("c21"),{type:"line",data:{labels:L,datasets:[
+    {label:"Real a precios de hoy",data:V,borderColor:"#3a8ee6",borderWidth:1.4,pointRadius:0,tension:0,order:1},
+    {label:`Rango normal (percentil 25 a 75)`,data:cte(p75),borderColor:"transparent",backgroundColor:"rgba(255,176,0,.10)",fill:"+1",pointRadius:0,order:5},
+    {label:"_p25",data:cte(p25),borderColor:"transparent",pointRadius:0,order:5},
+    {label:`Promedio ($ ${fmt(prom,0)})`,data:cte(prom),borderColor:"#ffb000",borderDash:[6,4],borderWidth:1.5,pointRadius:0,order:2},
+    {label:`Mediana ($ ${fmt(med,0)})`,data:cte(med),borderColor:"#ffffff",borderDash:[2,3],borderWidth:1.3,pointRadius:0,order:2},
+    {label:`Hoy ($ ${fmt(u[1],0)})`,data:cte(u[1]),borderColor:est[1],borderDash:[5,4],borderWidth:1.2,pointRadius:0,order:2}]},
+    options:{responsive:true,maintainAspectRatio:false,animation:false,interaction:{mode:"index",intersect:false},
+      plugins:{legend:{labels:{color:m,boxWidth:12,font,filter:it=>!it.text.startsWith("_")}},
+        tooltip:{filter:it=>it.datasetIndex===0,callbacks:{title:it=>dmy(L[it[0].dataIndex]),label:it=>`Real: $ ${fmt(it.raw,0)}`}}},
+      scales:{x:{grid:{display:false},ticks:{color:m,font,maxRotation:0,autoSkip:false,callback:(v,i)=>{const f=L[i],p=L[i-1];return p&&f.slice(0,4)!==p.slice(0,4)&&(rbAnios||+f.slice(0,4)%2===0)?f.slice(0,4):null;}}},
+        y:{grid:{color:g},ticks:{color:m,font,callback:v=>"$ "+fmt(v)}}}}});
+  document.getElementById("nreal").textContent=`Cuánto costaría hoy, en pesos, un real brasileño de cada fecha si se mantuviera el mismo tipo de cambio real bilateral con Brasil. Las estadísticas se calculan sobre el período elegido: debajo del percentil 25 el real está barato contra su historia, arriba del 75, caro. La mediana es menos sensible que el promedio a los picos de las crisis (2002, 2013, 2023). Durante los cepos (2011-2015 y 2019 en adelante) se usa el dólar MEP o el CCL en lugar del oficial; entre nov-2011 y dic-2012 no hay datos de mercado y se usa el oficial. El ITCRB del BCRA llega al ${dmy(R.ult_itcrb)}; los días posteriores usan el precio del real en pesos. Fuentes: BCRA, ArgentinaDatos, Banco Central Europeo (Frankfurter).`;
+}
+document.querySelectorAll("[data-rb]").forEach(b=>b.onclick=()=>{rbAnios=+b.dataset.rb;document.querySelectorAll("[data-rb]").forEach(x=>x.setAttribute("aria-pressed",x===b));realBrasil();});
+setTimeout(realBrasil,0);
+
+// Patentamientos
+let c20, patVista="autos";
+function patentes(){
+  const P=D.patentamientos||{}, panel=document.getElementById("ppat");
+  if(!P.autos&&!P.motos){panel.style.display="none";return;}
+  const S=Object.fromEntries(P[patVista]||[]), ks=Object.keys(S).sort(), u=ks[ks.length-1];
+  const y=+u.slice(0,4), mo=+u.slice(5), k=(yy,mm)=>`${yy}-${String(mm).padStart(2,"0")}`;
+  const prev=mo===1?k(y-1,12):k(y,mo-1), ia=k(y-1,mo);
+  const acum=(yy)=>{let t=0;for(let i=1;i<=mo;i++) t+=S[k(yy,i)]||0;return t;};
+  const pc=(a,b)=>b?(a/b-1)*100:null, cell=(t,v)=>`<div style="--c:${v>=0?"#00d26a":"#ff3b3b"}"><div class="nm">${t}</div><div class="pc">${v==null?"s/d":(v>0?"▲ +":"▼ ")+fmt(v,1)+" %"}</div></div>`;
+  const nom=patVista==="autos"?"AUTOS":"MOTOS", MES=["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
+  document.getElementById("patcards").innerHTML=
+    `<div style="--c:#ffb000"><div class="nm">${nom} · ${MES[mo-1].toUpperCase()} ${y}</div><div class="pc">${fmt(S[u],0)}</div><div class="rg">unidades</div></div>`+
+    cell("VAR. M/M",pc(S[u],S[prev]))+cell("VAR. A/A",pc(S[u],S[ia]))+cell(`VAR. ACUM. (ENE-${MES[mo-1].slice(0,3).toUpperCase()})`,pc(acum(y),acum(y-1)));
+  const m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  const L=MES.map(x=>x.slice(0,3)), cur=L.map((_,i)=>S[k(y,i+1)]??null), ant=L.map((_,i)=>S[k(y-1,i+1)]??null), ant2=L.map((_,i)=>S[k(y-2,i+1)]??null);
+  c20?.destroy();
+  c20=new Chart(document.getElementById("c20"),{type:"bar",data:{labels:L,datasets:[
+      {label:String(y-2),data:ant2,backgroundColor:"#444"},{label:String(y-1),data:ant,backgroundColor:"#3a8ee6"},{label:String(y),data:cur,backgroundColor:"#ffb000"}]},
+    options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
+      plugins:{legend:{labels:{color:m,boxWidth:12,font}},tooltip:{callbacks:{label:it=>it.raw==null?null:`${it.dataset.label}: ${fmt(it.raw,0)} unidades`}}},
+      scales:{x:{grid:{display:false},ticks:{color:m,font}},y:{beginAtZero:true,grid:{color:g},ticks:{color:m,font,callback:v=>fmt(v)}}}}});
+  document.getElementById("patt").textContent=`Patentamientos de ${patVista} · ${y} contra años anteriores`;
+  document.getElementById("npat").textContent=`Inscripciones iniciales registradas en la DNRPA en todo el país${patVista==="autos"?" (incluye autos y vehículos comerciales livianos y pesados)":""}. En ${y} van ${fmt(acum(y),0)} unidades contra ${fmt(acum(y-1),0)} en el mismo período de ${y-1}. El dato de cada mes se publica en los primeros días del mes siguiente. Fuente: DNRPA, datos abiertos del Ministerio de Justicia.`;
+}
+document.querySelectorAll("[data-pat]").forEach(b=>b.onclick=()=>{patVista=b.dataset.pat;document.querySelectorAll("[data-pat]").forEach(x=>x.setAttribute("aria-pressed",x===b));patentes();});
+setTimeout(patentes,0);
+
 // Servicios y turismo
 let c19, svVista="t";
 function servicios(){
@@ -1707,7 +1887,7 @@ function servicios(){
   document.getElementById("nserv").textContent=`Último: USD ${fmt(u[i],0)} M en los 12 meses a ${mesCorto(u[0])}${a?`, ${fmt((u[i]/a[i]-1)*100,0)} % más que un año antes`:""}. Son los dólares que ingresan por el mercado de cambios por cada servicio (balance cambiario del BCRA), por eso pueden diferir de las estadísticas del INDEC. Fuente: BCRA vía datos.gob.ar.`;
 }
 document.querySelectorAll("[data-sv]").forEach(b=>b.onclick=()=>{svVista=b.dataset.sv;document.querySelectorAll("[data-sv]").forEach(x=>x.setAttribute("aria-pressed",x===b));servicios();});
-setTimeout(()=>{mepBrasil();salarios();servicios();},0);
+setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();},0);
 
 // Semáforo de actividad
 function semaforoTabla(){
@@ -1722,7 +1902,7 @@ function semaforoTabla(){
     h+=`<tr><td class="t">${r.nombre}${r.sa?"":" *"}</td><td>${m(r.mes)}</td>${pc(r.mm)}${pc(r.tt)}${pc(r.ud)}${pc(r.ia)}${pc(r.ia3)}<td class="sv"><span class="dot" style="background:${col(r.sem)}" title="${r.sem==null?"":fmt(r.sem,1)+" %"}"></span></td></tr>`;});
   t.innerHTML=h+"</tbody>";
   const v=S.filter(r=>r.sem!=null), ver=v.filter(r=>r.sem>1).length, roj=v.filter(r=>r.sem<-1).length;
-  document.getElementById("nsem").innerHTML=`<b style="color:#00d26a">${ver} en verde</b> · <b style="color:#ffb000">${v.length-ver-roj} en amarillo</b> · <b style="color:#ff3b3b">${roj} en rojo</b>. Series desestacionalizadas: m/m mensual, t/t último trimestre contra el anterior, UD vs trim. prev. último dato contra el promedio de los tres meses anteriores; el color sigue esta última. * Series sin desestacionalizar: solo se comparan contra el año anterior y el color sigue la variación interanual de los últimos tres meses. Verde: más de +1 %; rojo: menos de −1 %. Préstamos y recaudación deflactados por IPC. Fuentes: INDEC, UTDT, AFIP y BCRA vía datos.gob.ar y la API del BCRA.`;
+  document.getElementById("nsem").innerHTML=`<b style="color:#00d26a">${ver} en verde</b> · <b style="color:#ffb000">${v.length-ver-roj} en amarillo</b> · <b style="color:#ff3b3b">${roj} en rojo</b>. Series desestacionalizadas: m/m mensual, t/t último trimestre contra el anterior, UD vs trim. prev. último dato contra el promedio de los tres meses anteriores; el color sigue esta última. * Series sin desestacionalizar: solo se comparan contra el año anterior y el color sigue la variación interanual de los últimos tres meses. Verde: más de +1 %; rojo: menos de −1 %. Préstamos y recaudación deflactados por IPC. Fuentes: INDEC, UTDT, AFIP, DNRPA y BCRA vía datos.gob.ar, datos.jus.gob.ar y la API del BCRA.`;
 }
 semaforoTabla();
 
@@ -1946,7 +2126,7 @@ function render(){
 
 }
 document.querySelectorAll("[data-mode]").forEach(b=>b.onclick=()=>{mode=b.dataset.mode;document.querySelectorAll("[data-mode]").forEach(x=>x.setAttribute("aria-pressed",x===b));render();});
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();inflacion();});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();inflacion();});
 render();
 function avisos(){const A=D.avisos||[], el=document.getElementById("avisos"); el.innerHTML=A.length?`<section class="panel" style="border-color:var(--bad)"><div class="k" style="color:var(--bad)">Avisos de la última actualización</div><ul class="n" style="margin:6px 0 0;padding-left:18px">${A.map(a=>`<li>${a.replace(/</g,"&lt;")}</li>`).join("")}</ul></section>`:"";}
 avisos();
@@ -1976,7 +2156,7 @@ document.addEventListener("keydown",e=>{ if(e.target.tagName==="SELECT"||e.targe
 })();
 (function reloj(){const el=document.getElementById("clk"); const f=()=>{el.textContent=new Date().toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})+" ART";}; f(); setInterval(f,30000);})();
 // Redibuja cuando termina de cargar la tipografía, para que las etiquetas midan bien
-if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();inflacion();});
+if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();inflacion();});
 // Recarga la página cada 10 minutos para tomar la última versión generada
 // Recarga salteando la caché del navegador (agrega ?t=… al link)
 const recargar=()=>location.replace(location.pathname+"?t="+Date.now()+location.hash);
