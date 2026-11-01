@@ -18,6 +18,7 @@ import argparse, datetime as dt, json, math, os, ssl, sys, urllib.parse, urllib.
 API = "https://api.bcra.gob.ar/estadisticas/v4.0/Monetarias/{id}?desde={desde}&limit=3000"
 VAR_COMPRAS, VAR_RESERVAS = 78, 1
 RIESGO_URL = "https://api.argentinadatos.com/v1/finanzas/indices/riesgo-pais"  # no lo publica el BCRA
+RIESGO_AMBITO = "https://mercados.ambito.com//riesgopais/historico-general/{desde}/{hasta}"  # trae el cierre del mismo día
 VAR_MINORISTA, VAR_TAMAR, VAR_BADLAR = 4, 44, 7  # TAMAR y BADLAR de bancos privados, TNA
 VAR_MAYORISTA, VAR_PISO, VAR_TECHO = 5, 1187, 1188   # tipo de cambio mayorista y bandas cambiarias
 SERIES_URL = "https://apis.datos.gob.ar/series/api/series/?ids={ids}&limit=5000&format=json"
@@ -603,8 +604,18 @@ def main():
         sys.exit(1)
 
     try:
-        rp = sorted(({"fecha": x["fecha"], "valor": float(x["valor"])} for x in get_json(RIESGO_URL)
-                     if x["fecha"] >= corto), key=lambda x: x["fecha"])
+        rp_d = {}
+        try:
+            rp_d = {x["fecha"]: float(x["valor"]) for x in get_json(RIESGO_URL) if x["fecha"] >= corto}
+        except Exception as e:
+            aviso(f"ArgentinaDatos no devolvió el riesgo país ({e})")
+        try:  # Ámbito publica el cierre el mismo día; pisa a ArgentinaDatos
+            for f, v in get_json(RIESGO_AMBITO.format(desde=corto, hasta=hoy.isoformat()))[1:]:
+                d_, m_, y_ = f.split("-")
+                rp_d[f"{y_}-{m_}-{d_}"] = float(v.replace(".", "").replace(",", "."))
+        except Exception as e:
+            aviso(f"Ámbito no devolvió el riesgo país ({e})")
+        rp = sorted(({"fecha": f, "valor": v} for f, v in rp_d.items()), key=lambda x: x["fecha"])
     except Exception as e:
         aviso(f"no se pudo traer el riesgo país ({e})")
         rp = []
@@ -1420,7 +1431,7 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
   </section>
 
   <div id="avisos"></div>
-  <footer>Fuente: API de Estadísticas Monetarias v4.0 del BCRA (variable 78, compras de divisas; 1, reservas; 4, dólar minorista promedio vendedor; 44 y 7, TAMAR y BADLAR de bancos privados en TNA). Riesgo país: índice EMBI de JP Morgan vía ArgentinaDatos. Bandas: variables 1187 y 1188 del BCRA. Alimentos: precios medios del IPC del INDEC en GBA, deflactados por IPC GBA (datos.gob.ar). Brechas: MEP, CCL y blue (ArgentinaDatos, precio de venta) contra el mayorista del mismo día (variable 5). Las tasas se publican con un día hábil de rezago. Los días marcados como provisorios salen del cierre informado por el BCRA o de tu carga manual, y se reemplazan por el dato oficial en la próxima ejecución. Las ruedas se comparan por orden dentro de cada mes, no por fecha.</footer>
+  <footer>Fuente: API de Estadísticas Monetarias v4.0 del BCRA (variable 78, compras de divisas; 1, reservas; 4, dólar minorista promedio vendedor; 44 y 7, TAMAR y BADLAR de bancos privados en TNA). Riesgo país: índice EMBI de JP Morgan vía Ámbito y ArgentinaDatos. Bandas: variables 1187 y 1188 del BCRA. Alimentos: precios medios del IPC del INDEC en GBA, deflactados por IPC GBA (datos.gob.ar). Brechas: MEP, CCL y blue (ArgentinaDatos, precio de venta) contra el mayorista del mismo día (variable 5). Las tasas se publican con un día hábil de rezago. Los días marcados como provisorios salen del cierre informado por el BCRA o de tu carga manual, y se reemplazan por el dato oficial en la próxima ejecución. Las ruedas se comparan por orden dentro de cada mes, no por fecha.</footer>
 </div>
 <script>
 const D = /*__DATOS__*/null;
