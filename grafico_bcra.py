@@ -52,6 +52,19 @@ CONFIG_DEFECTO = {
             {"nombre": "Merval USD", "fuente": "merval_usd", "simbolo": "^MERV", "precio_0": 2380, "precio_100": 475}
         ]
     },
+    "preocupaciones": {
+        "_ayuda": "Ranking de preocupaciones de la Encuesta de Satisfacción Política y Opinión Pública (UdeSA). "
+                  "No tiene fuente abierta: actualizá a mano las fechas y el ranking (1 = la mayor preocupación).",
+        "fuente": "FMyA en base a UdeSA",
+        "fechas": ["nov-23", "ago-26"],
+        "ranking": [["Desempleo", 8, 1], ["Bajos salarios", 7, 2], ["Corrupción", 2, 3], ["Pobreza", 5, 4], ["Políticos", 4, 5], ["Inseguridad", 3, 6], ["Endeudamiento externo", 6, 7], ["Inflación", 1, 8], ["Justicia", 9, 9], ["Educación", 9, 10], ["Narcotráfico", 11, 11], ["Salud", 12, 11], ["Obra pública", 16, 13], ["Acceso a vivienda", 12, 14], ["Policía", 14, 15], ["Villas", 15, 16], ["Transporte", 16, 16], ["Inmigración", 19, 16], ["Epidemias", 16, 19], ["Cambio climático", 19, 19]]
+    },
+    "reeleccion": {
+        "_ayuda": "Riesgo país esperado si Milei es reelecto (riesgo_gana) y si pierde (riesgo_pierde). "
+                  "La probabilidad implícita se interpola entre ambos. Valores calibrados con la serie de FMyA.",
+        "riesgo_gana": 215,
+        "riesgo_pierde": 1390
+    },
     "reservas_netas": {
         "_ayuda": "bis_mult_sedesa y la fecha salen del balance semanal del BCRA; actualizalos a mano. "
                   "oro_onzas_millones: tenencia de oro del BCRA en millones de onzas troy.",
@@ -831,7 +844,10 @@ def main():
     except Exception as e:
         aviso(f"no se pudo traer el tipo de cambio del yuan ({e})")
     try:
-        oro = float(get_json(ORO_URL)["price"])
+        try:
+            oro = float(get_json(ORO_URL)["price"])
+        except Exception:  # respaldo: último cierre del oro en Yahoo Finance
+            oro = float(get_json("https://query1.finance.yahoo.com/v8/finance/chart/GC%3DF?range=5d&interval=1d")["chart"]["result"][0]["meta"]["regularMarketPrice"])
         reservas_netas["oro"] = {"valor": rn_cfg["oro_onzas_millones"] * oro, "precio": oro}
     except Exception as e:
         aviso(f"no se pudo traer el precio del oro ({e})")
@@ -1089,6 +1105,50 @@ def main():
         historicos["salarios"] = {"nominal": sal, "ipc": {k: v for k, v in ipc_w.items() if k >= "2016-10"}}
     except Exception as e:
         aviso(f"no se pudo traer el índice de salarios ({e})")
+    try:  # Probabilidad de reelección implícita en el riesgo país + Índice de Confianza en el Gobierno (UTDT)
+        rcfg = cfg.get("reeleccion", CONFIG_DEFECTO["reeleccion"])
+        rr = {x["fecha"]: float(x["valor"]) for x in get_json(RIESGO_URL) if x["fecha"] >= "2024-01-01"}
+        try:
+            for f, v in get_json(RIESGO_AMBITO.format(desde=(hoy - dt.timedelta(days=45)).isoformat(), hasta=hoy.isoformat()))[1:]:
+                d_, m_, y_ = f.split("-")
+                rr[f"{y_}-{m_}-{d_}"] = float(v.replace(".", "").replace(",", "."))
+        except Exception:
+            pass
+        icg = [[r[0][:7], r[1]] for r in get_json(SERIES_URL.format(ids="370.3_ICG_NIVEL_RAL_0_0_17_94") + "&start_date=2024-01-01")["data"] if r[1] is not None]
+        historicos["reeleccion"] = {"riesgo": sorted(rr.items()), "icg": icg,
+                                    "gana": rcfg["riesgo_gana"], "pierde": rcfg["riesgo_pierde"]}
+    except Exception as e:
+        aviso(f"no se pudo armar la probabilidad de reelección ({e})")
+    try:  # Balance comercial (INDEC) y EMAE desestacionalizado
+        jc = get_json(SERIES_URL.format(ids="75.3_IETG_0_M_31,76.3_ITG_0_M_17,143.3_NO_PR_2004_A_31") + "&start_date=2010-01-01")
+        cc = {m.get("field", {}).get("id"): i for i, m in enumerate(jc["meta"])}
+        historicos["comercio"] = [[r[0][:7], r[cc["75.3_IETG_0_M_31"]], r[cc["76.3_ITG_0_M_17"]]] for r in jc["data"]
+                                  if r[0] >= "2023-01" and r[cc["75.3_IETG_0_M_31"]] is not None]
+        historicos["emae"] = [[r[0][:7], round(r[cc["143.3_NO_PR_2004_A_31"]], 2)] for r in jc["data"]
+                              if r[0] >= "2010-10" and r[cc["143.3_NO_PR_2004_A_31"]] is not None]
+    except Exception as e:
+        aviso(f"no se pudo traer comercio exterior o EMAE ({e})")
+    try:  # Oro del BCRA: tenencia (millones de onzas, config.json) por el precio diario del oro
+        r_oro = get_json("https://query1.finance.yahoo.com/v8/finance/chart/GC%3DF?range=5y&interval=1d")["chart"]["result"][0]
+        onzas = cfg.get("reservas_netas", {}).get("oro_onzas_millones", 1.98)
+        oro_d = {}
+        for t_, c_ in zip(r_oro["timestamp"], r_oro["indicators"]["quote"][0]["close"]):
+            if c_:
+                oro_d[dt.datetime.fromtimestamp(t_, dt.timezone.utc).date().isoformat()] = c_
+        historicos["oro"] = {"serie": [[f, round(v * onzas)] for f, v in sorted(oro_d.items()) if f >= "2023-10-01"],
+                             "onzas": onzas, "precio": [sorted(oro_d.items())[-1][0], round(sorted(oro_d.items())[-1][1], 1)]}
+    except Exception as e:
+        aviso(f"no se pudo traer el precio del oro ({e})")
+    historicos["preocupaciones"] = cfg.get("preocupaciones", CONFIG_DEFECTO["preocupaciones"])
+    try:  # Brasil: reservas internacionales y dólar (Banco Central do Brasil, series SGS 13621 y 1)
+        sgs = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.{id}/dados?formato=json&dataInicial={d}"
+        conv = lambda f: f[6:10] + "-" + f[3:5] + "-" + f[0:2]
+        ini_br = f"01/01/{hoy.year - 6}"
+        res_br = [[conv(x["data"]), round(float(x["valor"]) / 1000, 2)] for x in get_json(sgs.format(id=13621, d=ini_br))]
+        fx_br = [[conv(x["data"]), float(x["valor"])] for x in get_json(sgs.format(id=1, d=ini_br))]
+        historicos["brasil"] = {"res": res_br, "fx": fx_br}
+    except Exception as e:
+        aviso(f"no se pudieron traer los datos del Banco Central de Brasil ({e})")
     try:
         historicos["personas"] = personas_humanas(hoy)
     except Exception as e:
@@ -1403,10 +1463,11 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <button type="button" data-tab="compras" aria-pressed="false"><b>3)</b>COMPRAS</button>
     <button type="button" data-tab="reservas" aria-pressed="false"><b>4)</b>RESERVAS</button>
     <button type="button" data-tab="fx" aria-pressed="false"><b>5)</b>FX/BANDAS</button>
-    <button type="button" data-tab="bonos" aria-pressed="false"><b>6)</b>BONOS</button>
+    <button type="button" data-tab="bonos" aria-pressed="false"><b>6)</b>BONOS/POLÍTICA</button>
     <button type="button" data-tab="adrs" aria-pressed="false"><b>7)</b>ADRS</button>
     <button type="button" data-tab="ipc" aria-pressed="false"><b>8)</b>IPC</button>
     <button type="button" data-tab="actividad" aria-pressed="false"><b>9)</b>ACTIVIDAD</button>
+    <button type="button" data-tab="brasil" aria-pressed="false"><b>0)</b>BRASIL</button>
   </nav>
   <div class="tick" id="tick"></div>
   <p class="status" id="status"></p>
@@ -1466,6 +1527,19 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <p class="n" id="npat" style="margin:8px 0 0"></p>
   </section>
 
+  <section data-sec="actividad" class="panel" id="pemae">
+    <div class="phead"><h2>Actividad económica (EMAE desestacionalizado, 2004 = 100)</h2></div>
+    <div class="chartbox" style="height:360px"><canvas id="c24" aria-label="EMAE desestacionalizado desde 2010 con cambios de gobierno"></canvas></div>
+    <p class="n" id="nemae" style="margin:8px 0 0"></p>
+  </section>
+
+  <section data-sec="actividad" class="panel" id="pcom">
+    <div class="phead"><h2>Balance comercial: exportaciones e importaciones (mensual, USD millones)</h2></div>
+    <div class="gobs" id="comcards"></div>
+    <div class="chartbox" style="height:340px"><canvas id="c25" aria-label="Exportaciones e importaciones mensuales desde 2023"></canvas></div>
+    <p class="n" id="ncom" style="margin:8px 0 0"></p>
+  </section>
+
   <section data-sec="actividad" class="panel" id="pserv">
     <div class="phead"><h2>Ingreso de dólares por servicios y turismo (suma de 12 meses)</h2>
       <div class="seg" role="group" aria-label="Serie">
@@ -1492,6 +1566,24 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <div class="tablewrap"><table class="mkt" id="tbon"></table></div>
     <p class="n" style="margin:8px 0 0">Precio sucio cada 100 nominales en USD MEP (especie D), liquidación T+1. TIR efectiva anual; vs curva: desvío contra la curva de los bonos de la reestructuración de su misma ley; spread: contra el Tesoro de EE.UU. a igual duration. Hacé clic en un bono para ver sus flujos pendientes. Fuentes: data912, Yahoo Finance.</p>
     <div id="flujos" style="margin-top:8px"></div>
+  </section>
+
+  <section data-sec="bonos" class="panel" id="preel">
+    <div class="phead"><h2>Probabilidad de reelección de Milei implícita en el riesgo país y confianza en el gobierno</h2>
+      <div class="seg" role="group" aria-label="Período">
+        <button type="button" data-re="anio" aria-pressed="true">En el año</button>
+        <button type="button" data-re="12" aria-pressed="false">12 meses</button>
+        <button type="button" data-re="todo" aria-pressed="false">Desde 2024</button>
+      </div></div>
+    <div class="gobs" id="recards"></div>
+    <div class="chartbox" style="height:380px"><canvas id="c23" aria-label="Probabilidad de reelección implícita en el riesgo país y el Índice de Confianza en el Gobierno"></canvas></div>
+    <p class="n" id="nre" style="margin:8px 0 0"></p>
+  </section>
+
+  <section data-sec="bonos" class="panel" id="ppre">
+    <div class="phead"><h2 id="pret">Preocupaciones de los argentinos (ranking)</h2></div>
+    <div class="tablewrap"><table class="mkt" id="tpre"></table></div>
+    <p class="n" id="npre" style="margin:8px 0 0"></p>
   </section>
 
   <div class="duo">
@@ -1526,7 +1618,25 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <p class="n" id="ntcr" style="margin:8px 0 0"></p>
   </section>
 
-  <section data-sec="fx" class="panel" id="preal">
+  <section data-sec="reservas" class="panel" id="poro">
+    <div class="phead"><h2>Oro en el Banco Central (USD millones)</h2></div>
+    <div class="chartbox" style="height:340px"><canvas id="c26" aria-label="Valor diario del oro en las reservas del BCRA"></canvas></div>
+    <p class="n" id="noro" style="margin:8px 0 0"></p>
+  </section>
+
+  <section data-sec="brasil" class="panel" id="pbrres">
+    <div class="phead"><h2>Brasil: stock de reservas y dólar</h2>
+      <div class="seg" role="group" aria-label="Período">
+        <button type="button" data-br="1" aria-pressed="false">1 año</button>
+        <button type="button" data-br="2022" aria-pressed="true">Desde 2022</button>
+        <button type="button" data-br="6" aria-pressed="false">6 años</button>
+      </div></div>
+    <div class="gobs" id="brcards"></div>
+    <div class="chartbox" style="height:360px"><canvas id="c22" aria-label="Reservas internacionales de Brasil y tipo de cambio real por dólar"></canvas></div>
+    <p class="n" id="nbr" style="margin:8px 0 0"></p>
+  </section>
+
+  <section data-sec="brasil" class="panel" id="preal">
     <div class="phead"><h2>Real brasileño a precios de hoy (ITCRB Brasil)</h2>
       <div class="seg" role="group" aria-label="Período">
         <button type="button" data-rb="0" aria-pressed="true">Desde 1997</button>
@@ -1538,7 +1648,7 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <p class="n" id="nreal" style="margin:8px 0 0"></p>
   </section>
 
-  <section data-sec="fx" class="panel" id="pmepbr">
+  <section data-sec="brasil" class="panel" id="pmepbr">
     <div class="phead"><h2 id="mepbrt">Dólar MEP real ajustado por tipo de cambio real con Brasil</h2></div>
     <div class="chartbox" style="height:360px"><canvas id="c17" aria-label="Dólar MEP ajustado por el tipo de cambio real bilateral con Brasil desde 2001"></canvas></div>
     <p class="n" id="nmepbr" style="margin:8px 0 0"></p>
@@ -1559,7 +1669,7 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
   <section data-sec="ipc" class="panel" id="psal">
     <div class="phead"><h2 id="salt">Índice de salarios (INDEC)</h2>
       <div class="seg" role="group" aria-label="Vista">
-        <button type="button" data-sal="mm" aria-pressed="true">Mensual</button>
+        <button type="button" data-sal="mm" aria-pressed="true">Salario e inflación</button>
         <button type="button" data-sal="real" aria-pressed="false">Salario real</button>
       </div></div>
     <div class="gobs" id="salcards" style="grid-template-columns:repeat(5,minmax(0,1fr))"></div>
@@ -1947,16 +2057,23 @@ function salarios(){
       <div class="ab">v.ia. ${fmt(vi,1)} % · v.a. ${fmt(va,1)} %</div><div class="rg">Real i.a.: <b style="color:${real>=0?"var(--good)":"var(--bad)"}">${real>0?"+":""}${fmt(real,1)} %</b></div></div>`;}).join("");
   c18?.destroy();
   if(salVista==="mm"){
-    const L=ks.slice(-12);
-    const ser=(k,c)=>({label:SEC.find(x=>x[0]===k)[1],data:L.map(x=>pct(N[k][x],N[k][ant(x)])),backgroundColor:c,borderRadius:0});
-    const ipcm=L.map(x=>pct(I[x],I[ant(x)]));
-    c18=new Chart(document.getElementById("c18"),{data:{labels:L.map(mesCorto),datasets:[
-      {type:"bar",...ser("total","#8899aa")},{type:"bar",...ser("privado","#00d26a")},
-      {type:"line",label:"Inflación",data:ipcm,borderColor:"#ff3b3b",backgroundColor:"#ff3b3b",borderWidth:2,pointRadius:3,tension:.2}]},
+    const L=ks.slice(-13);
+    const priv=L.map(x=>pct(N.privado[x],N.privado[ant(x)])), tot=L.map(x=>pct(N.total[x],N.total[ant(x)]));
+    const Lx=[...L]; const ultI=Object.keys(I).sort().pop();
+    while(Lx[Lx.length-1]<ultI){let[y,mm]=Lx[Lx.length-1].split("-").map(Number);mm++;if(mm>12){mm=1;y++;}Lx.push(y+"-"+String(mm).padStart(2,"0"));}
+    const ipcm=Lx.map(x=>pct(I[x],I[ant(x)]));
+    const lab=[]; const n=Lx.length;
+    const marca=(di,arr,col)=>{const vals=arr.map((v,i)=>[v,i]).filter(x=>x[0]!=null); if(!vals.length) return;
+      const mx=vals.reduce((a,b)=>b[0]>a[0]?b:a); const last=vals.slice(-3); [mx,...last].forEach(([v,i],k)=>{ if(!lab.some(l=>l[0]===di&&l[1]===i)) lab.push([di,i,fmt(v,1)+"%",col,di===0]); });};
+    marca(0,priv,"#5fd3e6"); marca(1,ipcm,"#ffffff");
+    c18=new Chart(document.getElementById("c18"),{type:"line",data:{labels:Lx.map(mesCorto),datasets:[
+      {label:"Salario: privado registrado",data:Lx.map((x,i)=>priv[i]??null),borderColor:"#5fd3e6",backgroundColor:"#5fd3e6",borderWidth:3,pointRadius:4,tension:0},
+      {label:"Inflación (IPC)",data:ipcm,borderColor:"#ffffff",backgroundColor:"#ffffff",borderWidth:3,pointRadius:4,tension:0},
+      {label:"Salario: total",data:Lx.map((x,i)=>tot[i]??null),borderColor:"#777",borderDash:[4,3],borderWidth:1.5,pointRadius:0,tension:0}]},
       options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
-        plugins:{legend:{labels:{color:m,boxWidth:12,font}},tooltip:{callbacks:{label:it=>it.raw==null?null:`${it.dataset.label}: ${fmt(it.raw,1)} %`}}},
-        scales:{x:{grid:{display:false},ticks:{color:m,font}},y:{beginAtZero:true,grid:{color:g},ticks:{color:m,font,callback:v=>v+" %"}}}}});
-    document.getElementById("salt").textContent="Índice de salarios (INDEC): variación mensual";
+        plugins:{legend:{labels:{color:m,boxWidth:12,font}},etiquetas:{lista:lab},tooltip:{callbacks:{label:it=>it.raw==null?null:`${it.dataset.label}: ${fmt(it.raw,1)} %`}}},
+        scales:{x:{grid:{display:false},ticks:{color:m,font}},y:{grid:{color:g},ticks:{color:m,font,callback:v=>fmt(v,1)+" %"}}}},plugins:[etiquetas]});
+    document.getElementById("salt").textContent="Salario e inflación (variación mensual)";
   } else {
     const base="2023-11", L=ks.filter(x=>x>=base&&I[x]);
     const ds=SEC.filter(([k])=>N[k][base]&&k!=="noreg").map(([k,n,c])=>({label:n,data:L.map(x=>N[k][x]&&I[x]?(N[k][x]/I[x])/(N[k][base]/I[base])*100:null),borderColor:c,borderWidth:k==="total"?3:1.8,pointRadius:0,tension:.2}));
@@ -1969,6 +2086,168 @@ function salarios(){
   document.getElementById("nsal").textContent=`v.m.: variación mensual; v.ia.: interanual; v.a.: acumulada en el año; real i.a.: variación interanual descontada la inflación. El INDEC publica el índice con unos dos meses de rezago, y el dato del sector no registrado tiene cinco meses de rezago adicional (por eso no se incluye en el gráfico de salario real y su variación real está sobrestimada). Fuente: INDEC vía datos.gob.ar.`;
 }
 document.querySelectorAll("[data-sal]").forEach(b=>b.onclick=()=>{salVista=b.dataset.sal;document.querySelectorAll("[data-sal]").forEach(x=>x.setAttribute("aria-pressed",x===b));salarios();});
+
+// Etiquetas sobre puntos elegidos: options.plugins.etiquetas = [[datasetIndex, pointIndex, texto, color]]
+const etiquetas={id:"etiquetas",afterDatasetsDraw(ch,_,o){const L=o&&o.lista; if(!L) return; const {ctx}=ch; ctx.save(); ctx.font='bold 11px "IBM Plex Mono",monospace';
+  L.forEach(([di,pi,txt,col,arriba])=>{const meta=ch.getDatasetMeta(di); const pt=meta&&meta.data[pi]; if(!pt||meta.hidden) return;
+    const w=ctx.measureText(txt).width+8, x=Math.min(Math.max(pt.x-w/2,ch.chartArea.left),ch.chartArea.right-w), y=arriba===false?pt.y+8:pt.y-24;
+    ctx.fillStyle="rgba(0,0,0,.75)"; ctx.fillRect(x,y,w,16); ctx.strokeStyle=col; ctx.strokeRect(x,y,w,16); ctx.fillStyle=col; ctx.textAlign="left"; ctx.fillText(txt,x+4,y+12);}); ctx.restore();}};
+
+// Probabilidad de reelección (riesgo país) + ICG
+let c23, rePer="anio";
+function reeleccion(){
+  const R=(D.historicos||{}).reeleccion, panel=document.getElementById("preel");
+  if(!R||!R.riesgo.length){panel.style.display="none";return;}
+  const prob=v=>Math.max(0,Math.min(100,(R.pierde-v)/(R.pierde-R.gana)*100));
+  const ult=R.riesgo[R.riesgo.length-1][0];
+  const desde=rePer==="anio"?`${+ult.slice(0,4)-1}-12-31`:rePer==="12"?(()=>{const d=new Date(ult);d.setFullYear(d.getFullYear()-1);return d.toISOString().slice(0,10);})():"2024-01-01";
+  const S=R.riesgo.filter(x=>x[0]>=desde), L=S.map(x=>x[0]), P=S.map(x=>prob(x[1]));
+  const icgM=Object.fromEntries(R.icg); const icg=L.map(f=>{let v=null; for(const [k,x] of R.icg){ if(k<=f.slice(0,7)) v=x; } return v;});
+  const m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  const iU=P.length-1, iMax=P.indexOf(Math.max(...P)), iMin=P.indexOf(Math.min(...P));
+  const lab=[[0,iU,`${fmt(P[iU],0)}%`,"#3a8ee6"],[0,iMax,`${fmt(P[iMax],0)}%`,"#3a8ee6"]]; if(iMin!==iU) lab.push([0,iMin,`${fmt(P[iMin],0)}%`,"#3a8ee6",false]);
+  const iI=icg.length-1; if(icg[iI]!=null) lab.push([1,iI,fmt(icg[iI],2),"#ffb000",false]);
+  c23?.destroy();
+  c23=new Chart(document.getElementById("c23"),{type:"line",data:{labels:L.map(f=>dmy(f).slice(0,5)),datasets:[
+      {label:"Probabilidad de reelección implícita en el riesgo país",data:P,borderColor:"#3a8ee6",borderWidth:2.2,pointRadius:0,tension:.1,yAxisID:"y"},
+      {label:"Confianza en el Gobierno (ICG UTDT, der.)",data:icg,borderColor:"#ffb000",borderWidth:2,pointRadius:0,stepped:true,yAxisID:"y2"}]},
+    options:{responsive:true,maintainAspectRatio:false,animation:false,interaction:{mode:"index",intersect:false},
+      plugins:{legend:{labels:{color:m,boxWidth:12,font}},etiquetas:{lista:lab},tooltip:{callbacks:{title:it=>dmy(L[it[0].dataIndex]),
+        label:it=>it.raw==null?null:it.datasetIndex===0?`Prob. reelección: ${fmt(it.raw,0)} % (riesgo ${fmt(S[it.dataIndex][1],0)} pb)`:`ICG: ${fmt(it.raw,2)}`}}},
+      scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:14,maxRotation:0}},
+        y:{grid:{color:g},ticks:{color:"#3a8ee6",font,callback:v=>v+" %"},title:{display:true,text:"Probabilidad",color:m,font}},
+        y2:{position:"right",grid:{display:false},ticks:{color:"#ffb000",font,callback:v=>fmt(v,1)},title:{display:true,text:"ICG (0 a 5)",color:m,font}}}},plugins:[etiquetas]});
+  const u=S[S.length-1], a=S.find(x=>x[0]>=desde)||S[0], ic=R.icg[R.icg.length-1], icA=R.icg[R.icg.length-2];
+  const MES=["ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"];
+  document.getElementById("recards").innerHTML=
+    `<div style="--c:#3a8ee6"><div class="nm">PROB. REELECCIÓN · ${dmy(u[0])}</div><div class="pc">${fmt(prob(u[1]),0)} %</div><div class="rg">riesgo país ${fmt(u[1],0)} pb</div></div>`+
+    `<div style="--c:${prob(u[1])>=prob(a[1])?"#00d26a":"#ff3b3b"}"><div class="nm">VS INICIO DEL PERÍODO</div><div class="pc">${prob(u[1])-prob(a[1])>0?"+":""}${fmt(prob(u[1])-prob(a[1]),0)} pp</div><div class="rg">${fmt(prob(a[1]),0)} % el ${dmy(a[0])}</div></div>`+
+    `<div style="--c:#3a8ee6"><div class="nm">MÁXIMO DEL PERÍODO</div><div class="pc">${fmt(P[iMax],0)} %</div><div class="rg">${dmy(L[iMax])}</div></div>`+
+    `<div style="--c:#ffb000"><div class="nm">ICG UTDT · ${MES[+ic[0].slice(5)-1]}-${ic[0].slice(2,4)}</div><div class="pc">${fmt(ic[1],2)}</div><div class="rg">${icA?`${ic[1]-icA[1]>0?"▲ +":"▼ "}${fmt(ic[1]-icA[1],2)} vs mes anterior`:""}</div></div>`;
+  document.getElementById("nre").textContent=`La probabilidad interpola el riesgo país entre ${fmt(R.gana,0)} pb (si Milei es reelecto) y ${fmt(R.pierde,0)} pb (si pierde): a menor riesgo país, mayor probabilidad implícita. Los dos extremos se editan en config.json y están calibrados para replicar la serie de FMyA. El ICG de la Universidad Torcuato Di Tella va de 0 a 5 y es mensual. Fuentes: Ámbito y ArgentinaDatos (riesgo país), UTDT vía datos.gob.ar.`;
+}
+document.querySelectorAll("[data-re]").forEach(b=>b.onclick=()=>{rePer=b.dataset.re;document.querySelectorAll("[data-re]").forEach(x=>x.setAttribute("aria-pressed",x===b));reeleccion();});
+setTimeout(reeleccion,0);
+
+// EMAE con cambios de gobierno
+let c24;
+function emae(){
+  const E=(D.historicos||{}).emae||[], panel=document.getElementById("pemae");
+  if(!E.length){panel.style.display="none";return;}
+  const L=E.map(x=>x[0]), V=E.map(x=>x[1]), m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  const hitos=[["2011-12","CFK2"],["2015-12","Macri"],["2019-12","AF"],["2023-12","Milei"]].map(([k,n])=>[L.indexOf(k),n]).filter(x=>x[0]>=0);
+  const marc=V.map((v,i)=>hitos.some(h=>h[0]===i)?v:null);
+  const ic=L.indexOf("2020-04"); const lab=hitos.map(([i,n])=>[1,i,n,"#8fd14f"]); if(ic>=0) lab.push([0,ic,"Covid",css("--muted"),false]);
+  const iU=V.length-1; lab.push([0,iU,fmt(V[iU],1),"#3a8ee6"]);
+  const iMx=V.indexOf(Math.max(...V)); if(iMx!==iU) lab.push([0,iMx,"Máx. "+fmt(V[iMx],1),"#3a8ee6"]);
+  c24?.destroy();
+  c24=new Chart(document.getElementById("c24"),{data:{labels:L.map(mesCorto),datasets:[
+      {type:"line",label:"EMAE desestacionalizado",data:V,borderColor:"#3a8ee6",borderWidth:2.2,pointRadius:0,tension:.1},
+      {type:"line",label:"Cambio de gobierno",data:marc,borderColor:"#8fd14f",backgroundColor:"#8fd14f",pointRadius:8,showLine:false}]},
+    options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
+      plugins:{legend:{labels:{color:m,boxWidth:12,font}},etiquetas:{lista:lab},tooltip:{callbacks:{label:it=>it.raw==null||it.datasetIndex===1?null:`EMAE: ${fmt(it.raw,1)}`}}},
+      scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:16,maxRotation:0}},y:{grid:{color:g},ticks:{color:m,font}}}},plugins:[etiquetas]});
+  const u=E[iU], a=E[iU-1], ia=E.find(x=>x[0]===`${+u[0].slice(0,4)-1}${u[0].slice(4)}`);
+  document.getElementById("nemae").textContent=`Último dato: ${mesCorto(u[0])} ${fmt(u[1],1)} (${fmt((u[1]/a[1]-1)*100,1)} % contra el mes anterior${ia?`, ${fmt((u[1]/ia[1]-1)*100,1)} % contra un año antes`:""}). Máximo de la serie: ${fmt(V[iMx],1)} en ${mesCorto(L[iMx])}. Los puntos verdes marcan el inicio de cada gobierno. Fuente: INDEC (Estimador Mensual de Actividad Económica) vía datos.gob.ar.`;
+}
+setTimeout(emae,0);
+
+// Balance comercial
+let c25;
+function comercio(){
+  const C=(D.historicos||{}).comercio||[], panel=document.getElementById("pcom");
+  if(!C.length){panel.style.display="none";return;}
+  const L=C.map(x=>x[0]), X=C.map(x=>x[1]), M=C.map(x=>x[2]), m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  const n=L.length-1, lab=[];
+  const marca=(di,arr,col,ab)=>{const vs=arr.map((v,i)=>[v,i]); const mx=vs.slice(-12).reduce((a,b)=>b[0]>a[0]?b:a), mn=vs.slice(-12).reduce((a,b)=>b[0]<a[0]?b:a);
+    [[arr[n],n],mx,mn].forEach(([v,i])=>{if(!lab.some(l=>l[0]===di&&l[1]===i)) lab.push([di,i,fmt(v,0),col,i===mn[1]&&i!==n?false:ab]);});};
+  marca(0,X,"#3a8ee6",true); marca(1,M,"#5fd3e6",false);
+  c25?.destroy();
+  c25=new Chart(document.getElementById("c25"),{data:{labels:L.map(mesCorto),datasets:[
+      {type:"line",label:"Exportaciones",data:X,borderColor:"#3a8ee6",borderWidth:2.5,pointRadius:0,tension:0},
+      {type:"line",label:"Importaciones",data:M,borderColor:"#5fd3e6",borderWidth:2.5,pointRadius:0,tension:0},
+      {type:"bar",label:"Saldo (der.)",data:X.map((x,i)=>x-M[i]),yAxisID:"y2",backgroundColor:X.map((x,i)=>x-M[i]>=0?"#00d26a40":"#ff3b3b40")}]},
+    options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
+      plugins:{legend:{labels:{color:m,boxWidth:12,font}},etiquetas:{lista:lab},tooltip:{callbacks:{label:it=>`${it.dataset.label}: USD ${fmt(it.raw,0)} M`}}},
+      scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:14,maxRotation:0}},y:{grid:{color:g},ticks:{color:m,font,callback:v=>fmt(v)}},
+        y2:{position:"right",grid:{display:false},suggestedMax:Math.max(...X.map((x,i)=>x-M[i]))*3,ticks:{color:"#00d26a",font,callback:v=>fmt(v)}}}},plugins:[etiquetas]});
+  const k=(y,mm)=>`${y}-${String(mm).padStart(2,"0")}`, u=L[n], y=+u.slice(0,4), mo=+u.slice(5);
+  const sum=(yy,i)=>C.filter(x=>x[0]>=k(yy,1)&&x[0]<=k(yy,mo)).reduce((a,x)=>a+x[i],0);
+  const sal=X[n]-M[n], sy=sum(y,1)-sum(y,2), sy1=sum(y-1,1)-sum(y-1,2);
+  const ia=C.find(x=>x[0]===k(y-1,mo));
+  document.getElementById("comcards").innerHTML=
+    `<div style="--c:#3a8ee6"><div class="nm">EXPORTACIONES · ${mesCorto(u)}</div><div class="pc">USD ${fmt(X[n],0)} M</div><div class="rg">${ia?`${fmt((X[n]/ia[1]-1)*100,1)} % i.a.`:""}</div></div>`+
+    `<div style="--c:#5fd3e6"><div class="nm">IMPORTACIONES · ${mesCorto(u)}</div><div class="pc">USD ${fmt(M[n],0)} M</div><div class="rg">${ia?`${fmt((M[n]/ia[2]-1)*100,1)} % i.a.`:""}</div></div>`+
+    `<div style="--c:${sal>=0?"#00d26a":"#ff3b3b"}"><div class="nm">SALDO DEL MES</div><div class="pc">USD ${fmt(sal,0)} M</div></div>`+
+    `<div style="--c:${sy>=0?"#00d26a":"#ff3b3b"}"><div class="nm">SALDO ENE-${mesCorto(u).slice(0,3).toUpperCase()} ${y}</div><div class="pc">USD ${fmt(sy,0)} M</div><div class="rg">${y-1}: USD ${fmt(sy1,0)} M</div></div>`;
+  document.getElementById("ncom").textContent=`Intercambio comercial argentino (INDEC), en millones de dólares corrientes. El INDEC publica cada mes hacia el día 20; datos.gob.ar suele cargarlo unas semanas después. Fuente: INDEC vía datos.gob.ar.`;
+}
+setTimeout(comercio,0);
+
+// Oro del BCRA
+let c26;
+function oro(){
+  const O=(D.historicos||{}).oro, panel=document.getElementById("poro");
+  if(!O||!O.serie.length){panel.style.display="none";return;}
+  const S=O.serie, L=S.map(x=>x[0]), V=S.map(x=>x[1]), m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  const iU=V.length-1, iMx=V.indexOf(Math.max(...V));
+  c26?.destroy();
+  c26=new Chart(document.getElementById("c26"),{type:"line",data:{labels:L.map(f=>dmy(f).slice(0,5)+"/"+f.slice(2,4)),datasets:[
+      {label:"Oro en el BCRA (USD M)",data:V,borderColor:"#ffb000",backgroundColor:"#ffb00018",fill:true,borderWidth:2,pointRadius:0,tension:.1}]},
+    options:{responsive:true,maintainAspectRatio:false,animation:false,interaction:{mode:"index",intersect:false},
+      plugins:{legend:{display:false},etiquetas:{lista:[[0,iU,fmt(V[iU],0),"#ffb000"],[0,iMx,fmt(V[iMx],0),"#ffb000"]]},tooltip:{callbacks:{label:it=>`USD ${fmt(it.raw,0)} M`}}},
+      scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:12,maxRotation:0}},y:{grid:{color:g},ticks:{color:m,font,callback:v=>fmt(v)}}}},plugins:[etiquetas]});
+  document.getElementById("noro").textContent=`Hoy USD ${fmt(V[iU],0)} M (${dmy(L[iU])}), ${fmt((V[iU]/V[iMx]-1)*100,0)} % contra el máximo de USD ${fmt(V[iMx],0)} M del ${dmy(L[iMx])}. Se calcula con la tenencia del BCRA (${fmt(O.onzas,2)} millones de onzas troy, editable en config.json) por el precio diario del oro (USD ${fmt(O.precio[1],0)} la onza). Fuente: BCRA (tenencia), Yahoo Finance (precio del oro, futuro COMEX).`;
+}
+setTimeout(oro,0);
+
+// Preocupaciones (ranking UdeSA)
+function preocupaciones(){
+  const P=(D.historicos||{}).preocupaciones, panel=document.getElementById("ppre");
+  if(!P||!P.ranking||!P.ranking.length){panel.style.display="none";return;}
+  const [f1,f2]=P.fechas, R=[...P.ranking].sort((a,b)=>a[2]-b[2]||a[1]-b[1]);
+  const flecha=(a,b)=>{const d=a-b; return d>0?`<td class="pc up">▲ ${d}</td>`:d<0?`<td class="pc down">▼ ${-d}</td>`:'<td class="pc">=</td>';};
+  document.getElementById("tpre").innerHTML=`<thead><tr><th>Preocupación</th><th>${f1}</th><th>${f2}</th><th>Cambio</th></tr></thead><tbody>`+
+    R.map(([n,a,b])=>`<tr${b<=3?' style="background:#1a1300"':""}><td class="t">${n}</td><td>${a}</td><td class="val">${b}</td>${flecha(a,b)}</tr>`).join("")+"</tbody>";
+  document.getElementById("pret").textContent=`Preocupaciones de los argentinos: ranking ${f1} contra ${f2}`;
+  document.getElementById("npre").textContent=`Puesto en el ranking (1 = la mayor preocupación). ▲ sube como preocupación, ▼ baja. Fuente: ${P.fuente||"UdeSA"}. Esta encuesta no tiene datos abiertos: para actualizarla, editá el bloque "preocupaciones" de config.json.`;
+}
+setTimeout(preocupaciones,0);
+
+// Brasil: reservas y dólar
+let c22, brPer="2022";
+function brasilRes(){
+  const B=(D.historicos||{}).brasil, panel=document.getElementById("pbrres");
+  if(!B||!B.res.length){panel.style.display="none";return;}
+  const uR=B.res[B.res.length-1], uF=B.fx[B.fx.length-1];
+  let desde=brPer==="2022"?"2022-01-01":(()=>{const d=new Date(uF[0]);d.setFullYear(d.getFullYear()-+brPer);return d.toISOString().slice(0,10);})();
+  const R=Object.fromEntries(B.res.filter(x=>x[0]>=desde)), F=Object.fromEntries(B.fx.filter(x=>x[0]>=desde));
+  const L=[...new Set([...Object.keys(R),...Object.keys(F)])].sort();
+  const m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  const busca=(arr,f)=>{let r=null;for(const x of arr){if(x[0]<=f) r=x; else break;}return r;};
+  const hace=(arr,dias)=>{const d=new Date(arr[arr.length-1][0]);d.setDate(d.getDate()-dias);return busca(arr,d.toISOString().slice(0,10));};
+  const fin=a=>busca(a,`${+a[a.length-1][0].slice(0,4)-1}-12-31`);
+  const pc=(a,b)=>b?(a/b-1)*100:null, sg=v=>v==null?"s/d":`${v>0?"+":""}${fmt(v,1)} %`, col=v=>v==null?"#777":v>=0?"#00d26a":"#ff3b3b";
+  const r1=hace(B.res,365), fA=fin(B.fx), f1d=B.fx[B.fx.length-2], f30=hace(B.fx,30);
+  document.getElementById("brcards").innerHTML=
+    `<div style="--c:#3a8ee6"><div class="nm">RESERVAS · ${dmy(uR[0])}</div><div class="pc">USD ${fmt(uR[1],1)} mil M</div><div class="rg">${r1?`${sg(pc(uR[1],r1[1]))} en 12 meses (${fmt(uR[1]-r1[1],1)} mil M)`:""}</div></div>`+
+    `<div style="--c:#5fd3e6"><div class="nm">DÓLAR EN BRASIL · ${dmy(uF[0])}</div><div class="pc">R$ ${fmt(uF[1],4)}</div><div class="rg">PTAX venta</div></div>`+
+    `<div style="--c:${col(pc(uF[1],f1d[1]))}"><div class="nm">VAR. DÍA</div><div class="pc">${sg(pc(uF[1],f1d[1]))}</div><div class="rg">vs ${dmy(f1d[0])}</div></div>`+
+    `<div style="--c:${col(pc(uF[1],fA&&fA[1]))}"><div class="nm">VAR. EN EL AÑO</div><div class="pc">${sg(pc(uF[1],fA&&fA[1]))}</div><div class="rg">30 días: ${sg(pc(uF[1],f30&&f30[1]))}</div></div>`;
+  c22?.destroy();
+  c22=new Chart(document.getElementById("c22"),{type:"line",data:{labels:L,datasets:[
+    {label:"Reservas (USD mil millones)",data:L.map(f=>R[f]??null),borderColor:"#3a8ee6",borderWidth:2,pointRadius:0,spanGaps:true,yAxisID:"y",tension:0},
+    {label:"Tipo de cambio R$/USD (der.)",data:L.map(f=>F[f]??null),borderColor:"#5fd3e6",borderWidth:1.6,pointRadius:0,spanGaps:true,yAxisID:"y2",tension:0}]},
+    options:{responsive:true,maintainAspectRatio:false,animation:false,interaction:{mode:"index",intersect:false},
+      plugins:{legend:{labels:{color:m,boxWidth:12,font}},tooltip:{callbacks:{title:it=>dmy(L[it[0].dataIndex]),
+        label:it=>it.raw==null?null:it.datasetIndex===0?`Reservas: USD ${fmt(it.raw,1)} mil M`:`Dólar: R$ ${fmt(it.raw,4)}`}}},
+      scales:{x:{grid:{display:false},ticks:{color:m,font,maxRotation:0,autoSkip:false,callback:(v,i)=>{const f=L[i],p=L[i-1];return p&&f.slice(0,7)!==p.slice(0,7)&&["01","07"].includes(f.slice(5,7))?f.slice(5,7)==="01"?f.slice(0,4):"jul":null;}}},
+        y:{grid:{color:g},ticks:{color:m,font},title:{display:true,text:"USD mil millones",color:m,font}},
+        y2:{position:"right",grid:{display:false},ticks:{color:"#5fd3e6",font,callback:v=>"R$ "+fmt(v,2)}}}}});
+  document.getElementById("nbr").textContent=`Reservas internacionales totales de Brasil (diarias) y dólar oficial PTAX de venta. Un real más débil (dólar más alto) abarata a Brasil frente a la Argentina: se refleja en los gráficos de real a precios de hoy y MEP real de esta pestaña. Fuente: Banco Central do Brasil (series SGS 13621 y 1).`;
+}
+document.querySelectorAll("[data-br]").forEach(b=>b.onclick=()=>{brPer=b.dataset.br;document.querySelectorAll("[data-br]").forEach(x=>x.setAttribute("aria-pressed",x===b));brasilRes();});
+setTimeout(brasilRes,0);
 
 // Real brasileño a precios de hoy
 let c21, rbAnios=0;
@@ -2054,7 +2333,7 @@ function servicios(){
   document.getElementById("nserv").textContent=`Último: USD ${fmt(u[i],0)} M en los 12 meses a ${mesCorto(u[0])}${a?`, ${fmt((u[i]/a[i]-1)*100,0)} % más que un año antes`:""}. Son los dólares que ingresan por el mercado de cambios por cada servicio (balance cambiario del BCRA), por eso pueden diferir de las estadísticas del INDEC. Fuente: BCRA vía datos.gob.ar.`;
 }
 document.querySelectorAll("[data-sv]").forEach(b=>b.onclick=()=>{svVista=b.dataset.sv;document.querySelectorAll("[data-sv]").forEach(x=>x.setAttribute("aria-pressed",x===b));servicios();});
-setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();},0);
+setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();},0);
 
 // Semáforo de actividad
 function semaforoTabla(){
@@ -2293,7 +2572,7 @@ function render(){
 
 }
 document.querySelectorAll("[data-mode]").forEach(b=>b.onclick=()=>{mode=b.dataset.mode;document.querySelectorAll("[data-mode]").forEach(x=>x.setAttribute("aria-pressed",x===b));render();});
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();inflacion();});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();inflacion();});
 render();
 function avisos(){const A=D.avisos||[], el=document.getElementById("avisos"); el.innerHTML=A.length?`<section class="panel" style="border-color:var(--bad)"><div class="k" style="color:var(--bad)">Avisos de la última actualización</div><ul class="n" style="margin:6px 0 0;padding-left:18px">${A.map(a=>`<li>${a.replace(/</g,"&lt;")}</li>`).join("")}</ul></section>`:"";}
 avisos();
@@ -2305,7 +2584,7 @@ function verTab(t){
   window.scrollTo(0,0);
 }
 document.querySelectorAll("#fk button").forEach(b=>b.onclick=()=>{verTab(b.dataset.tab); history.replaceState(null,"",b.dataset.tab==="todo"?location.pathname:"#"+b.dataset.tab);});
-document.addEventListener("keydown",e=>{ if(e.target.tagName==="SELECT"||e.target.tagName==="INPUT") return; const n=+e.key; const bs=[...document.querySelectorAll("#fk button")]; if(n>=1&&n<=bs.length) bs[n-1].click(); });
+document.addEventListener("keydown",e=>{ if(e.target.tagName==="SELECT"||e.target.tagName==="INPUT") return; const bs=[...document.querySelectorAll("#fk button")]; const n=e.key==="0"?10:+e.key; if(n>=1&&n<=bs.length) bs[n-1].click(); });
 {const h=location.hash.slice(1); if(h&&document.querySelector(`#fk button[data-tab="${h}"]`)) verTab(h);}
 // Cinta de cotizaciones
 (function cinta(){
@@ -2323,7 +2602,7 @@ document.addEventListener("keydown",e=>{ if(e.target.tagName==="SELECT"||e.targe
 })();
 (function reloj(){const el=document.getElementById("clk"); const f=()=>{el.textContent=new Date().toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})+" ART";}; f(); setInterval(f,30000);})();
 // Redibuja cuando termina de cargar la tipografía, para que las etiquetas midan bien
-if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();inflacion();});
+if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();inflacion();});
 // Recarga la página cada 10 minutos para tomar la última versión generada
 // Recarga salteando la caché del navegador (agrega ?t=… al link)
 const recargar=()=>location.replace(location.pathname+"?t="+Date.now()+location.hash);
