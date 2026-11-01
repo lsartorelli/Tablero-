@@ -617,15 +617,51 @@ def datos_de_prensa(fechas_buscadas):
                 rv = float(mr.group(1).replace(".", ""))
                 if 20000 < rv < 150000:
                     hallazgos[f]["reservas"].append((medio, rv))
+    # Titulares de Google Noticias: suman más medios (muchos ponen la cifra en el título)
+    for q in ("BCRA+compr%C3%B3+millones", "reservas+BCRA+millones", "Banco+Central+reservas+millones"):
+        try:
+            xml = get_bytes(f"https://news.google.com/rss/search?q={q}&hl=es-419&gl=AR&ceid=AR:es-419").decode("utf-8", "ignore")
+        except Exception:
+            continue
+        for it in _re.findall(r"<item>(.*?)</item>", xml, _re.S):
+            mt = _re.search(r"<title>(.*?)</title>", it, _re.S)
+            fe = _re.search(r"<pubDate>(.*?)</pubDate>", it)
+            so = _re.search(r"<source[^>]*>(.*?)</source>", it, _re.S)
+            if not (mt and fe):
+                continue
+            tit = _h.unescape(_re.sub(r"<[^>]+>", "", _re.sub(r"<!\[CDATA\[|\]\]>", "", mt.group(1))))
+            medio = (so.group(1) if so else tit.rsplit(" - ", 1)[-1]).strip().lower()
+            pub = email.utils.parsedate_to_datetime(fe.group(1)).astimezone(dt.timezone(dt.timedelta(hours=-3)))
+            dia = pub.date()
+            if pub.hour < 12:
+                dia -= dt.timedelta(days=1)
+                while dia.weekday() >= 5:
+                    dia -= dt.timedelta(days=1)
+            f = dia.isoformat()
+            if f not in hallazgos:
+                continue
+            for m in pat_c.finditer(tit):
+                if not excl.search(m.group(2)):
+                    v = float(m.group(1).replace(".", "").replace(",", "."))
+                    if v <= 1000:
+                        hallazgos[f]["compra"].append(("gn:" + medio, v))
+                    break
+            mr = _re.search(r"reservas[^.]{0,60}?(?:a|en|hasta)\s" + cur + r"([\d\.]{5,7})\s*millones", tit, _re.I)
+            if mr:
+                rv = float(mr.group(1).replace(".", ""))
+                if 20000 < rv < 150000:
+                    hallazgos[f]["reservas"].append(("gn:" + medio, rv))
     out = {}
     for f, h in hallazgos.items():
         fila = {}
         for campo in ("compra", "reservas"):
             por_medio = {}
             for medio, v in h[campo]:
-                por_medio.setdefault(medio, v)  # primera mención de cada medio
-            c = Counter(por_medio.values()).most_common(1)
-            if c and c[0][1] >= 2:
+                clave = medio.replace("gn:", "").split(".")[0]  # un voto por medio aunque aparezca por dos vías
+                por_medio.setdefault(clave, v)  # primera mención de cada medio
+            c = Counter(por_medio.values()).most_common(2)
+            # se acepta si lo confirman al menos dos medios y le gana a cualquier otra cifra
+            if c and c[0][1] >= 2 and (len(c) == 1 or c[0][1] > c[1][1]):
                 fila[campo] = c[0][0]
         if fila:
             out[f] = fila
