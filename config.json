@@ -48,5 +48,129 @@
       "oro": 4099,
       "base_monetaria": 35171884
     }
+  },
+  "reeleccion": {
+    "_ayuda": "Riesgo país esperado si Milei es reelecto (riesgo_gana) y si pierde (riesgo_pierde). La probabilidad implícita se interpola entre ambos. Valores calibrados con la serie de FMyA.",
+    "riesgo_gana": 215,
+    "riesgo_pierde": 1390
+  },
+  "preocupaciones": {
+    "_ayuda": "Ranking de preocupaciones de la Encuesta de Satisfacción Política y Opinión Pública (UdeSA). No tiene fuente abierta: actualizá a mano las fechas y el ranking (1 = la mayor preocupación).",
+    "fuente": "FMyA en base a UdeSA",
+    "fechas": [
+      "nov-23",
+      "ago-26"
+    ],
+    "ranking": [
+      [
+        "Desempleo",
+        8,
+        1
+      ],
+      [
+        "Bajos salarios",
+        7,
+        2
+      ],
+      [
+        "Corrupción",
+        2,
+        3
+      ],
+      [
+        "Pobreza",
+        5,
+        4
+      ],
+      [
+        "Políticos",
+        4,
+        5
+      ],
+      [
+        "Inseguridad",
+        3,
+        6
+      ],
+      [
+        "Endeudamiento externo",
+        6,
+        7
+      ],
+      [
+        "Inflación",
+        1,
+        8
+      ],
+      [
+        "Justicia",
+        9,
+        9
+      ],
+      [
+        "Educación",
+        9,
+        10
+      ],
+      [
+        "Narcotráfico",
+        11,
+        11
+      ],
+      [
+        "Salud",
+        12,
+        11
+      ],
+      [
+        "Obra pública",
+        16,
+        13
+      ],
+      [
+        "Acceso a vivienda",
+        12,
+        14
+      ],
+      [
+        "Policía",
+        14,
+        15
+      ],
+      [
+        "Villas",
+        15,
+        16
+      ],
+      [
+        "Transporte",
+        16,
+        16
+      ],
+      [
+        "Inmigración",
+        19,
+        16
+      ],
+      [
+        "Epidemias",
+        16,
+        19
+      ],
+      [
+        "Cambio climático",
+        19,
+        19
+      ]
+    ]
+  },
+  "mora_estimada": {
+    "_ayuda": "Adelantos privados de la mora (por ejemplo de la consultora 1816 con la Central de Deudores) para los meses que el BCRA todavía no publicó. Se muestran como estimados y se ignoran solos cuando sale el dato oficial.",
+    "2026-09": {
+      "total": 7.5,
+      "familias": 12.2,
+      "empresas": 3.82,
+      "fuente": "1816 en base a la Central de Deudores"
+    }
   }
 }

@@ -59,6 +59,11 @@ CONFIG_DEFECTO = {
         "fechas": ["nov-23", "ago-26"],
         "ranking": [["Desempleo", 8, 1], ["Bajos salarios", 7, 2], ["Corrupción", 2, 3], ["Pobreza", 5, 4], ["Políticos", 4, 5], ["Inseguridad", 3, 6], ["Endeudamiento externo", 6, 7], ["Inflación", 1, 8], ["Justicia", 9, 9], ["Educación", 9, 10], ["Narcotráfico", 11, 11], ["Salud", 12, 11], ["Obra pública", 16, 13], ["Acceso a vivienda", 12, 14], ["Policía", 14, 15], ["Villas", 15, 16], ["Transporte", 16, 16], ["Inmigración", 19, 16], ["Epidemias", 16, 19], ["Cambio climático", 19, 19]]
     },
+    "mora_estimada": {
+        "_ayuda": "Adelantos privados de la mora (por ejemplo de la consultora 1816 con la Central de Deudores) para los meses "
+                  "que el BCRA todavía no publicó. Se muestran como estimados y se ignoran solos cuando sale el dato oficial.",
+        "2026-09": {"total": 7.50, "familias": 12.2, "empresas": 3.82, "fuente": "1816 en base a la Central de Deudores"}
+    },
     "reeleccion": {
         "_ayuda": "Riesgo país esperado si Milei es reelecto (riesgo_gana) y si pierde (riesgo_pierde). "
                   "La probabilidad implícita se interpola entre ambos. Valores calibrados con la serie de FMyA.",
@@ -467,6 +472,73 @@ def semaforo(hoy, infl_mensual, extra=None):
         except Exception as e:
             aviso(f"semáforo: no se pudo calcular {nombre} ({e})")
     return out
+
+
+# ---------- Mora (irregularidad) del crédito: anexo del Informe sobre Bancos del BCRA ----------
+MORA_URL = "https://www.bcra.gob.ar/archivos/Pdfs/PublicacionesEstadisticas/informes/informe-bancos-anexo.xlsx"
+
+
+def leer_hoja_xlsx(datos, nombre):
+    """Lee una hoja de un .xlsx (sin librerías externas). Devuelve lista de filas {columna: valor}."""
+    import io, re as _re, zipfile, html as _h
+    z = zipfile.ZipFile(io.BytesIO(datos))
+    sst = []
+    if "xl/sharedStrings.xml" in z.namelist():
+        for si in _re.findall(r"<si>(.*?)</si>", z.read("xl/sharedStrings.xml").decode("utf-8"), _re.S):
+            sst.append(_h.unescape("".join(_re.findall(r"<t[^>]*>(.*?)</t>", si, _re.S))))
+    wb = z.read("xl/workbook.xml").decode("utf-8")
+    rels = dict(_re.findall(r'Id="(rId\d+)"[^>]*Target="([^"]+)"', z.read("xl/_rels/workbook.xml.rels").decode("utf-8")))
+    rid = next(r for n, r in _re.findall(r'<sheet [^>]*name="([^"]+)"[^>]*r:id="([^"]+)"', wb) if _h.unescape(n) == nombre)
+    xml = z.read("xl/" + rels[rid].lstrip("/").replace("xl/", "")).decode("utf-8")
+    filas = []
+    for fila in _re.findall(r"<row [^>]*>(.*?)</row>", xml, _re.S):
+        d = {}
+        for col, attrs, val in _re.findall(r'<c r="([A-Z]+)\d+"([^>]*?)(?:/>|>(?:<f>.*?</f>)?(?:<v>([^<]*)</v>)?(?:<is>.*?</is>)?</c>)', fila, _re.S):
+            if val == "":
+                continue
+            d[col] = sst[int(val)] if 't="s"' in attrs else val
+        filas.append(d)
+    return filas
+
+
+def _col_idx(c):
+    n = 0
+    for ch in c:
+        n = n * 26 + ord(ch) - 64
+    return n
+
+
+def mora_credito():
+    """Ratio de irregularidad mensual (desde 2010): total sector privado, familias, empresas y líneas de familias."""
+    filas = leer_hoja_xlsx(get_bytes(MORA_URL), "Calidad de Cartera (por líneas)")
+    secciones = {"1. Total Sector Privado": "total", "2. Familias - Total": "familias", "3. Empresas - Total": "empresas"}
+    out, actual, fechas = {}, None, None
+    for f in filas:
+        a = str(f.get("A", "")).strip()
+        if a in secciones:
+            actual, fechas = secciones[a], None
+            continue
+        if a.startswith(("1.1", "2.1", "3.1")):
+            actual = None
+        if actual and a == "En porcentaje":  # fila de fechas (números de serie de Excel)
+            fechas = {c: (dt.date(1899, 12, 30) + dt.timedelta(days=int(float(v)))).strftime("%Y-%m")
+                      for c, v in f.items() if c != "A" and _re_num(v)}
+            continue
+        if actual and fechas and a in ("Cartera irregular total", "Personales", "Tarjetas de crédito", "Documentos", "Adelantos"):
+            clave = actual if a == "Cartera irregular total" else f"{actual}_{a.split()[0].lower()}"
+            if clave not in out:
+                out[clave] = sorted((fechas[c], round(float(v), 2)) for c, v in f.items() if c in fechas and _re_num(v))
+            if a == "Cartera irregular total" and actual == "total":
+                pass
+    return out
+
+
+def _re_num(v):
+    try:
+        float(v)
+        return True
+    except (TypeError, ValueError):
+        return False
 
 
 def dia_habil_siguiente(d):
@@ -1174,6 +1246,13 @@ def main():
     except Exception as e:
         aviso(f"no se pudieron traer los datos del Banco Central de Brasil ({e})")
     try:
+        historicos["mora"] = mora_credito()
+        est = {k: v for k, v in cfg.get("mora_estimada", CONFIG_DEFECTO["mora_estimada"]).items()
+               if not k.startswith("_") and k > historicos["mora"]["total"][-1][0]}
+        historicos["mora_est"] = est
+    except Exception as e:
+        aviso(f"no se pudo leer la mora del crédito del Informe sobre Bancos ({e})")
+    try:
         historicos["personas"] = personas_humanas(hoy)
     except Exception as e:
         aviso(f"no se pudo armar la serie de compras de personas humanas ({e})")
@@ -1549,6 +1628,18 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <div class="gobs" id="patcards"></div>
     <div class="chartbox" style="height:320px"><canvas id="c20" aria-label="Patentamientos mensuales del año actual contra el año anterior"></canvas></div>
     <p class="n" id="npat" style="margin:8px 0 0"></p>
+  </section>
+
+  <section data-sec="actividad" class="panel" id="pmora">
+    <div class="phead"><h2>Mora del crédito al sector privado (ratio de irregularidad)</h2>
+      <div class="seg" role="group" aria-label="Período">
+        <button type="button" data-mo="2" aria-pressed="true">2 años</button>
+        <button type="button" data-mo="5" aria-pressed="false">5 años</button>
+        <button type="button" data-mo="0" aria-pressed="false">Desde 2010</button>
+      </div></div>
+    <div class="gobs" id="mocards"></div>
+    <div class="chartbox" style="height:360px"><canvas id="c28" aria-label="Ratio de irregularidad del crédito a familias y empresas"></canvas></div>
+    <p class="n" id="nmo" style="margin:8px 0 0"></p>
   </section>
 
   <section data-sec="actividad" class="panel" id="pemae">
@@ -2165,6 +2256,41 @@ function reeleccion(){
 document.querySelectorAll("[data-re]").forEach(b=>b.onclick=()=>{rePer=b.dataset.re;document.querySelectorAll("[data-re]").forEach(x=>x.setAttribute("aria-pressed",x===b));reeleccion();});
 setTimeout(reeleccion,0);
 
+// Mora del crédito
+let c28, moAnios=2;
+function mora(){
+  const M=(D.historicos||{}).mora, panel=document.getElementById("pmora");
+  if(!M||!M.total){panel.style.display="none";return;}
+  const SER=[["total","Total sector privado","#ffffff",3],["familias","Familias","#ff3b3b",2.5],["empresas","Empresas","#3a8ee6",2.5],
+             ["familias_personales","Familias: préstamos personales","#ff9a3c",1.4],["familias_tarjetas","Familias: tarjetas","#b388ff",1.4]].filter(x=>M[x[0]]);
+  const E=(D.historicos||{}).mora_est||{}, mesesE=Object.keys(E).sort();
+  const ult=M.total[M.total.length-1][0];
+  const desde=moAnios?`${+ult.slice(0,4)-moAnios}${ult.slice(4)}`:"2010-01";
+  const L=[...M.total.map(x=>x[0]).filter(k=>k>=desde),...mesesE], m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  const mp=k=>Object.fromEntries(M[k]);
+  const lab=[]; SER.slice(0,3).forEach(([k,n,c],di)=>{const iO=L.indexOf(ult), v=mp(k)[ult]; if(v!=null) lab.push([di,iO,fmt(v,2)+"%",c]);
+    if(mesesE.length){const ke=mesesE[mesesE.length-1], ve=E[ke][k]; if(ve!=null) lab.push([SER.length+di,L.length-1,fmt(ve,2)+"% est.",c,false]);}});
+  const est=SER.slice(0,3).map(([k,n,c])=>({label:`${n} (estimado)`,data:L.map(x=>x===ult?mp(k)[x]:(E[x]&&E[x][k]!=null?E[x][k]:null)),borderColor:c,borderWidth:2,borderDash:[2,4],pointRadius:L.map(x=>E[x]?4:0),pointStyle:"rectRot",spanGaps:true,tension:0}));
+  c28?.destroy();
+  c28=new Chart(document.getElementById("c28"),{type:"line",data:{labels:L.map(mesCorto),datasets:SER.map(([k,n,c,w],i)=>({label:n,data:L.map(x=>mp(k)[x]??null),borderColor:c,borderWidth:w,
+      borderDash:i>=3?[4,3]:[],pointRadius:i<3?2:0,tension:.2,hidden:i>=3&&moAnios===0})).concat(mesesE.length?est:[])},
+    options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
+      plugins:{legend:{labels:{color:m,boxWidth:12,font,filter:it=>!it.text.endsWith("(estimado)")}},etiquetas:{lista:lab},tooltip:{callbacks:{label:it=>it.raw==null||(it.dataset.label.endsWith("(estimado)")&&L[it.dataIndex]===ult)?null:`${it.dataset.label}: ${fmt(it.raw,2)} %`}}},
+      scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:14,maxRotation:0}},y:{beginAtZero:true,grid:{color:g},ticks:{color:m,font,callback:v=>v+" %"}}}},plugins:[etiquetas]});
+  const card=(k,n,c)=>{const S=[...M[k],...mesesE.filter(x=>E[x][k]!=null).map(x=>[x,E[x][k]])]; const u=S[S.length-1], a=S[S.length-2], a3=S[S.length-4], ia=S.find(x=>x[0]===`${+u[0].slice(0,4)-1}${u[0].slice(4)}`);
+    const esEst=!!E[u[0]];
+    const d1=u[1]-a[1], d3=u[1]-a3[1]; const t=Math.abs(d3)<0.15?["ESTABLE","#ffb000"]:d3>0?["SUBIENDO","#ff3b3b"]:["BAJANDO","#00d26a"];
+    return `<div style="--c:${c}"><div class="nm">${n} · ${mesCorto(u[0])}${esEst?" (EST.)":""}</div><div class="pc">${fmt(u[1],2)} %</div>
+      <div class="ab" style="color:${t[1]}">${t[0]} · ${d3>0?"+":""}${fmt(d3,2)} pp en 3 meses</div>
+      <div class="rg">${d1>0?"▲ +":"▼ "}${fmt(d1,2)} pp vs mes anterior${ia?` · ${u[1]-ia[1]>0?"+":""}${fmt(u[1]-ia[1],1)} pp i.a.`:""}</div></div>`;};
+  const mx=M.familias?M.familias.reduce((a,b)=>b[1]>a[1]?b:a):null;
+  document.getElementById("mocards").innerHTML=card("total","TOTAL SECTOR PRIVADO","#ffffff")+(M.familias?card("familias","FAMILIAS","#ff3b3b"):"")+(M.empresas?card("empresas","EMPRESAS","#3a8ee6"):"")+
+    (mx?`<div style="--c:#777"><div class="nm">MÁXIMO FAMILIAS</div><div class="pc">${fmt(mx[1],2)} %</div><div class="rg">${mesCorto(mx[0])}</div></div>`:"");
+  document.getElementById("nmo").textContent=`Porcentaje del crédito al sector privado en situación irregular (deudores en situación 3 a 6 de la Central de Deudores: más de 90 días de atraso o en gestión judicial). La tendencia compara el último dato con el de tres meses antes: sube o baja si cambió más de 0,15 pp. El BCRA publica el Informe sobre Bancos con unos dos meses de rezago${mesesE.length?`; los puntos punteados (${mesesE.map(mesCorto).join(", ")}) son estimaciones privadas cargadas en config.json (${E[mesesE[mesesE.length-1]].fuente||"estimación privada"}) y se reemplazan solas por el dato oficial`:""}. Fuente: BCRA, anexo del Informe sobre Bancos.`;
+}
+document.querySelectorAll("[data-mo]").forEach(b=>b.onclick=()=>{moAnios=+b.dataset.mo;document.querySelectorAll("[data-mo]").forEach(x=>x.setAttribute("aria-pressed",x===b));mora();});
+setTimeout(mora,0);
+
 // EMAE con cambios de gobierno
 let c24;
 function emae(){
@@ -2415,7 +2541,7 @@ function servicios(){
   document.getElementById("nserv").textContent=`Último: USD ${fmt(u[i],0)} M en los 12 meses a ${mesCorto(u[0])}${a?`, ${fmt((u[i]/a[i]-1)*100,0)} % más que un año antes`:""}. Son los dólares que ingresan por el mercado de cambios por cada servicio (balance cambiario del BCRA), por eso pueden diferir de las estadísticas del INDEC. Fuente: BCRA vía datos.gob.ar.`;
 }
 document.querySelectorAll("[data-sv]").forEach(b=>b.onclick=()=>{svVista=b.dataset.sv;document.querySelectorAll("[data-sv]").forEach(x=>x.setAttribute("aria-pressed",x===b));servicios();});
-setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();},0);
+setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();},0);
 
 // Semáforo de actividad
 function semaforoTabla(){
@@ -2654,7 +2780,7 @@ function render(){
 
 }
 document.querySelectorAll("[data-mode]").forEach(b=>b.onclick=()=>{mode=b.dataset.mode;document.querySelectorAll("[data-mode]").forEach(x=>x.setAttribute("aria-pressed",x===b));render();});
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();inflacion();});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();inflacion();});
 render();
 function avisos(){const A=D.avisos||[], el=document.getElementById("avisos"); el.innerHTML=A.length?`<section class="panel" style="border-color:var(--bad)"><div class="k" style="color:var(--bad)">Avisos de la última actualización</div><ul class="n" style="margin:6px 0 0;padding-left:18px">${A.map(a=>`<li>${a.replace(/</g,"&lt;")}</li>`).join("")}</ul></section>`:"";}
 avisos();
@@ -2684,7 +2810,7 @@ document.addEventListener("keydown",e=>{ if(e.target.tagName==="SELECT"||e.targe
 })();
 (function reloj(){const el=document.getElementById("clk"); const f=()=>{el.textContent=new Date().toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})+" ART";}; f(); setInterval(f,30000);})();
 // Redibuja cuando termina de cargar la tipografía, para que las etiquetas midan bien
-if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();inflacion();});
+if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();inflacion();});
 // Recarga la página cada 10 minutos para tomar la última versión generada
 // Recarga salteando la caché del navegador (agrega ?t=… al link)
 const recargar=()=>location.replace(location.pathname+"?t="+Date.now()+location.hash);
