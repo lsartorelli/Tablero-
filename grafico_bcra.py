@@ -1140,12 +1140,36 @@ def main():
     except Exception as e:
         aviso(f"no se pudo traer el precio del oro ({e})")
     historicos["preocupaciones"] = cfg.get("preocupaciones", CONFIG_DEFECTO["preocupaciones"])
+    try:  # Índice Big Mac de The Economist (datos abiertos en GitHub, se actualiza en enero y julio)
+        import csv, io
+        filas_bm = list(csv.DictReader(io.StringIO(get_bytes(
+            "https://raw.githubusercontent.com/TheEconomist/big-mac-data/master/output-data/big-mac-raw-index.csv").decode("utf-8"))))
+        ult_bm = max(x["date"] for x in filas_bm)
+        rank = sorted(([x["name"], round(float(x["dollar_price"]), 2), x["iso_a3"]] for x in filas_bm if x["date"] == ult_bm), key=lambda y: -y[1])
+        hist_bm = {}
+        for x in filas_bm:
+            if x["iso_a3"] in ("ARG", "USA", "URY", "EUZ", "BRA", "CHL"):
+                hist_bm.setdefault(x["iso_a3"], []).append([x["date"], round(float(x["dollar_price"]), 2)])
+        arg = next((x for x in filas_bm if x["date"] == ult_bm and x["iso_a3"] == "ARG"), None)
+        historicos["bigmac"] = {"fecha": ult_bm, "ranking": rank, "hist": hist_bm,
+                                "arg_local": float(arg["local_price"]) if arg else None, "arg_tc": float(arg["dollar_ex"]) if arg else None}
+    except Exception as e:
+        aviso(f"no se pudo traer el índice Big Mac ({e})")
     try:  # Brasil: reservas internacionales y dólar (Banco Central do Brasil, series SGS 13621 y 1)
         sgs = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.{id}/dados?formato=json&dataInicial={d}"
         conv = lambda f: f[6:10] + "-" + f[3:5] + "-" + f[0:2]
         ini_br = f"01/01/{hoy.year - 6}"
-        res_br = [[conv(x["data"]), round(float(x["valor"]) / 1000, 2)] for x in get_json(sgs.format(id=13621, d=ini_br))]
-        fx_br = [[conv(x["data"]), float(x["valor"])] for x in get_json(sgs.format(id=1, d=ini_br))]
+        def sgs_get(sid):  # la API del Banco Central de Brasil a veces da error 502: reintenta
+            import time
+            for intento in range(3):
+                try:
+                    return get_json(sgs.format(id=sid, d=ini_br))
+                except Exception:
+                    if intento == 2:
+                        raise
+                    time.sleep(5)
+        res_br = [[conv(x["data"]), round(float(x["valor"]) / 1000, 2)] for x in sgs_get(13621)]
+        fx_br = [[conv(x["data"]), float(x["valor"])] for x in sgs_get(1)]
         historicos["brasil"] = {"res": res_br, "fx": fx_br}
     except Exception as e:
         aviso(f"no se pudieron traer los datos del Banco Central de Brasil ({e})")
@@ -1610,6 +1634,18 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <div class="phead"><h2>Compras netas de dólares de personas humanas</h2></div>
     <div class="chartbox" style="height:320px"><canvas id="c13" aria-label="Compras netas mensuales de moneda extranjera de las personas humanas, en millones de dólares"></canvas></div>
     <p class="n" id="nph" style="margin:8px 0 0"></p>
+  </section>
+
+  <section data-sec="fx" class="panel" id="pbm">
+    <div class="phead"><h2 id="bmt">Precio del Big Mac en dólares</h2>
+      <div class="seg" role="group" aria-label="Vista">
+        <button type="button" data-bm="sel" aria-pressed="true">Ranking</button>
+        <button type="button" data-bm="todos" aria-pressed="false">Todos los países</button>
+        <button type="button" data-bm="hist" aria-pressed="false">Evolución</button>
+      </div></div>
+    <div class="gobs" id="bmcards"></div>
+    <div class="chartbox" id="bmbox" style="height:520px"><canvas id="c27" aria-label="Precio del Big Mac en dólares por país"></canvas></div>
+    <p class="n" id="nbm" style="margin:8px 0 0"></p>
   </section>
 
   <section data-sec="fx" class="panel" id="ptcr">
@@ -2184,6 +2220,52 @@ function comercio(){
 }
 setTimeout(comercio,0);
 
+// Big Mac
+let c27, bmVista="sel";
+const BM_SEL=["CHE","URY","NOR","GBR","SWE","EUZ","DNK","TUR","MEX","USA","ARG","CHL","BRA","CHN","KOR","JPN","IND"];
+function bigmac(){
+  const B=(D.historicos||{}).bigmac, panel=document.getElementById("pbm");
+  if(!B||!B.ranking.length){panel.style.display="none";return;}
+  const m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  const MES=["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
+  const fe=`${MES[+B.fecha.slice(5,7)-1]} de ${B.fecha.slice(0,4)}`;
+  const R=B.ranking, ar=R.find(x=>x[2]==="ARG"), us=R.find(x=>x[2]==="USA"), pos=R.findIndex(x=>x[2]==="ARG")+1;
+  const X=(D.dolar||{}).brechas||{}, mep=(X.mep||[]).slice(-1)[0], may=((D.dolar||{}).mayorista||[]).slice(-1)[0];
+  document.getElementById("bmcards").innerHTML=
+    `<div style="--c:#ff3b3b"><div class="nm">ARGENTINA · ${fe.toUpperCase()}</div><div class="pc">USD ${fmt(ar[1],2)}</div><div class="rg">$ ${fmt(B.arg_local,0)} a $ ${fmt(B.arg_tc,0)} por dólar</div></div>`+
+    `<div style="--c:#ffb000"><div class="nm">CONTRA EE.UU.</div><div class="pc">${ar[1]>=us[1]?"+":""}${fmt((ar[1]/us[1]-1)*100,0)} %</div><div class="rg">EE.UU.: USD ${fmt(us[1],2)} · ${ar[1]<us[1]?"Argentina más barata":"Argentina más cara"}</div></div>`+
+    `<div style="--c:#3a8ee6"><div class="nm">PUESTO</div><div class="pc">${pos} de ${R.length}</div><div class="rg">del más caro al más barato</div></div>`+
+    (mep?`<div style="--c:#777"><div class="nm">A DÓLAR MEP DE HOY</div><div class="pc">USD ${fmt(B.arg_local/mep.precio,2)}</div><div class="rg">mismo precio en pesos a $ ${fmt(mep.precio,0)} (sin ajustar por inflación)</div></div>`:"");
+  c27?.destroy();
+  const box=document.getElementById("bmbox");
+  if(bmVista==="hist"){
+    box.style.height="380px";
+    const NOM={ARG:"Argentina",USA:"Estados Unidos",URY:"Uruguay",EUZ:"Zona euro",BRA:"Brasil",CHL:"Chile"}, COL={ARG:"#3a8ee6",USA:"#ffb000",URY:"#00d26a",EUZ:"#ff3b3b",BRA:"#b388ff",CHL:"#5fd3e6"};
+    const fechas=[...new Set(Object.values(B.hist).flatMap(a=>a.map(x=>x[0])))].sort();
+    c27=new Chart(document.getElementById("c27"),{type:"line",data:{labels:fechas.map(f=>f.slice(0,7)),datasets:Object.keys(NOM).filter(k=>B.hist[k]).map(k=>{const mp=Object.fromEntries(B.hist[k]);
+        return {label:NOM[k],data:fechas.map(f=>mp[f]??null),spanGaps:true,borderColor:COL[k],borderWidth:k==="ARG"?3.5:2,pointRadius:0,tension:.15,hidden:k==="BRA"||k==="CHL"};})},
+      options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
+        plugins:{legend:{labels:{color:m,boxWidth:12,font}},tooltip:{callbacks:{label:it=>it.raw==null?null:`${it.dataset.label}: USD ${fmt(it.raw,2)}`}}},
+        scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:14,maxRotation:0,callback:function(v){const l=this.getLabelForValue(v);return l.slice(0,4);}}},y:{grid:{color:g},ticks:{color:m,font,callback:v=>"USD "+fmt(v)}}}}});
+    document.getElementById("bmt").textContent="Precio del Big Mac en dólares: evolución";
+  } else {
+    const L=bmVista==="sel"?R.filter(x=>BM_SEL.includes(x[2])):R;
+    box.style.height=Math.max(380,L.length*22+60)+"px";
+    c27=new Chart(document.getElementById("c27"),{type:"bar",data:{labels:L.map(x=>x[0]),datasets:[{label:"USD",data:L.map(x=>x[1]),
+        backgroundColor:L.map(x=>x[2]==="ARG"?"#ff3b3b":x[2]==="USA"?"#ffb000":"#3a8ee6")}]},
+      options:{indexAxis:"y",responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},
+        etiquetas:{lista:L.map((x,i)=>[0,i,fmt(x[1],2),"#dddddd"])},tooltip:{callbacks:{label:it=>`USD ${fmt(it.raw,2)}`}}},
+        scales:{x:{beginAtZero:true,grid:{color:g},ticks:{color:m,font}},y:{grid:{display:false},ticks:{color:m,font,autoSkip:false}}}},plugins:[etiquetasBarra]});
+    document.getElementById("bmt").textContent=`Precio del Big Mac en dólares · última observación: ${fe}`;
+  }
+  document.getElementById("nbm").textContent=`Precio local del Big Mac convertido a dólares al tipo de cambio del momento del relevamiento. Es una forma sencilla de comparar si un país está caro o barato en dólares. The Economist lo releva dos veces por año (enero y julio) y el tablero toma la edición nueva sola. Fuente: The Economist, Big Mac index (datos abiertos en GitHub).`;
+}
+// etiqueta al final de cada barra horizontal
+const etiquetasBarra={id:"etiquetasBarra",afterDatasetsDraw(ch,_,o){const L=ch.options.plugins.etiquetas&&ch.options.plugins.etiquetas.lista; if(!L) return; const {ctx}=ch; ctx.save(); ctx.font='11px "IBM Plex Mono",monospace'; ctx.fillStyle="#ddd"; ctx.textBaseline="middle";
+  L.forEach(([di,pi,txt])=>{const pt=ch.getDatasetMeta(di).data[pi]; if(pt) ctx.fillText(txt,pt.x+4,pt.y);}); ctx.restore();}};
+document.querySelectorAll("[data-bm]").forEach(b=>b.onclick=()=>{bmVista=b.dataset.bm;document.querySelectorAll("[data-bm]").forEach(x=>x.setAttribute("aria-pressed",x===b));bigmac();});
+setTimeout(bigmac,0);
+
 // Oro del BCRA
 let c26;
 function oro(){
@@ -2333,7 +2415,7 @@ function servicios(){
   document.getElementById("nserv").textContent=`Último: USD ${fmt(u[i],0)} M en los 12 meses a ${mesCorto(u[0])}${a?`, ${fmt((u[i]/a[i]-1)*100,0)} % más que un año antes`:""}. Son los dólares que ingresan por el mercado de cambios por cada servicio (balance cambiario del BCRA), por eso pueden diferir de las estadísticas del INDEC. Fuente: BCRA vía datos.gob.ar.`;
 }
 document.querySelectorAll("[data-sv]").forEach(b=>b.onclick=()=>{svVista=b.dataset.sv;document.querySelectorAll("[data-sv]").forEach(x=>x.setAttribute("aria-pressed",x===b));servicios();});
-setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();},0);
+setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();},0);
 
 // Semáforo de actividad
 function semaforoTabla(){
@@ -2572,7 +2654,7 @@ function render(){
 
 }
 document.querySelectorAll("[data-mode]").forEach(b=>b.onclick=()=>{mode=b.dataset.mode;document.querySelectorAll("[data-mode]").forEach(x=>x.setAttribute("aria-pressed",x===b));render();});
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();inflacion();});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();inflacion();});
 render();
 function avisos(){const A=D.avisos||[], el=document.getElementById("avisos"); el.innerHTML=A.length?`<section class="panel" style="border-color:var(--bad)"><div class="k" style="color:var(--bad)">Avisos de la última actualización</div><ul class="n" style="margin:6px 0 0;padding-left:18px">${A.map(a=>`<li>${a.replace(/</g,"&lt;")}</li>`).join("")}</ul></section>`:"";}
 avisos();
@@ -2602,7 +2684,7 @@ document.addEventListener("keydown",e=>{ if(e.target.tagName==="SELECT"||e.targe
 })();
 (function reloj(){const el=document.getElementById("clk"); const f=()=>{el.textContent=new Date().toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})+" ART";}; f(); setInterval(f,30000);})();
 // Redibuja cuando termina de cargar la tipografía, para que las etiquetas midan bien
-if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();inflacion();});
+if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();inflacion();});
 // Recarga la página cada 10 minutos para tomar la última versión generada
 // Recarga salteando la caché del navegador (agrega ?t=… al link)
 const recargar=()=>location.replace(location.pathname+"?t="+Date.now()+location.hash);
