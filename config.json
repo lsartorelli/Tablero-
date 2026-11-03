@@ -1,28 +1,30 @@
 {
   "escenarios": {
-    "_ayuda": "precio_0 y precio_100 son tus precios objetivo con 0 % y 100 % de probabilidad. fuente: bono (data912, precio en USD MEP), yahoo (ticker de Yahoo Finance) o merval_usd (Merval / CCL).",
+    "_ayuda": "precio_0 y precio_100 son tus precios objetivo con 0 % y 100 % de probabilidad. fuente: bono (data912), yahoo (ticker de Yahoo Finance) o merval_usd (Merval / CCL). precio (solo bonos): limpio_ccl, sucio_ccl, limpio_mep o sucio_mep.",
     "filas": [
       0,
       10,
       20,
-      30,
       40,
+      45,
       100
     ],
     "activos": [
       {
         "nombre": "GD38",
         "fuente": "bono",
-        "simbolo": "GD38D",
-        "precio_0": 85.18,
-        "precio_100": 45.0
+        "simbolo": "GD38",
+        "precio_0": 85.59,
+        "precio_100": 45.0,
+        "precio": "limpio_ccl"
       },
       {
         "nombre": "GD35",
         "fuente": "bono",
-        "simbolo": "GD35D",
-        "precio_0": 82.76,
-        "precio_100": 45.0
+        "simbolo": "GD35",
+        "precio_0": 83.25,
+        "precio_100": 45.0,
+        "precio": "limpio_ccl"
       },
       {
         "nombre": "Merval USD",

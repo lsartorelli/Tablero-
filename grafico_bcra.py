@@ -44,11 +44,12 @@ HIST_LOCAL = os.path.join(BASE, "historial_bonos.json")  # cierres que guarda el
 CONFIG_DEFECTO = {
     "escenarios": {
         "_ayuda": "precio_0 y precio_100 son tus precios objetivo con 0 % y 100 % de probabilidad. "
-                  "fuente: bono (data912, precio en USD MEP), yahoo (ticker de Yahoo Finance) o merval_usd (Merval / CCL).",
-        "filas": [0, 10, 20, 30, 40, 100],
+                  "fuente: bono (data912), yahoo (ticker de Yahoo Finance) o merval_usd (Merval / CCL). "
+                  "precio (solo bonos): limpio_ccl, sucio_ccl, limpio_mep o sucio_mep.",
+        "filas": [0, 10, 20, 40, 45, 100],
         "activos": [
-            {"nombre": "GD38", "fuente": "bono", "simbolo": "GD38D", "precio_0": 85.18, "precio_100": 45.0},
-            {"nombre": "GD35", "fuente": "bono", "simbolo": "GD35D", "precio_0": 82.76, "precio_100": 45.0},
+            {"nombre": "GD38", "fuente": "bono", "simbolo": "GD38", "precio": "limpio_ccl", "precio_0": 85.59, "precio_100": 45.0},
+            {"nombre": "GD35", "fuente": "bono", "simbolo": "GD35", "precio": "limpio_ccl", "precio_0": 83.25, "precio_100": 45.0},
             {"nombre": "Merval USD", "fuente": "merval_usd", "simbolo": "^MERV", "precio_0": 2380, "precio_100": 475}
         ]
     },
@@ -578,13 +579,30 @@ def leer_config():
     return cfg
 
 
+def corrido_bono(t, liq):
+    """Intereses corridos por cada 100 nominales originales a la fecha de liquidación."""
+    fl = flujos_bono(t)
+    fut = [f for f in fl if f[0] > liq]
+    pas = [f for f in fl if f[0] <= liq]
+    if not fut or not pas:
+        return 0.0
+    return fut[0][1] * _d360(pas[-1][0], liq) / max(_d360(pas[-1][0], fut[0][0]), 1)
+
+
 def precio_activo(a, bonos_cache, ccl):
     f, sim = a.get("fuente"), a.get("simbolo")
     if f == "bono":
         if "d" not in bonos_cache:
             bonos_cache["d"] = {x["symbol"]: x for x in get_json(BONOS_URL)}
-        x = bonos_cache["d"].get(sim)
-        return float(x["c"]) if x and x.get("c") else None
+        tipo = a.get("precio", "sucio_mep")
+        base = sim[:-1] if sim[-1:] in ("D", "C") else sim
+        x = bonos_cache["d"].get(base + ("C" if tipo.endswith("ccl") else "D"))
+        if not (x and x.get("c")):
+            return None
+        px = float(x["c"])
+        if tipo.startswith("limpio"):  # precio limpio: sin intereses corridos
+            px -= corrido_bono(base, dia_habil_siguiente(dt.date.today()))
+        return px
     if f == "yahoo":
         return float(get_json(YAHOO_URL.format(t=urllib.parse.quote(sim)))["chart"]["result"][0]["meta"]["regularMarketPrice"])
     if f == "merval_usd":
@@ -891,7 +909,7 @@ def main():
             aviso(f"no se pudo traer el precio de {act['nombre']} ({e})")
             px = None
         escenarios["activos"].append({"nombre": act["nombre"], "p0": act["precio_0"], "p100": act["precio_100"],
-                                      "precio": px, "fuente": act.get("fuente")})
+                                      "precio": px, "fuente": act.get("fuente"), "tipo": act.get("precio")})
 
     # --- Reservas netas
     rn_cfg = cfg["reservas_netas"]
@@ -2702,7 +2720,7 @@ function celda(v){
   h+=`<tr class="prob"><td>Prob implícita</td>${A.map(a=>{if(a.precio==null) return `<td>–</td><td></td>`;
     const pr=(a.p0-a.precio)/(a.p0-a.p100)*100; return `<td class="pv">${fmt(pr,1)} %</td><td></td>`;}).join("")}</tr></tbody>`;
   t.innerHTML=h;
-  document.getElementById("nesc").textContent="Precio de cada escenario interpolado entre tus precios objetivo con 0 % y 100 % de probabilidad (config.json). Up/Down: ganancia o pérdida desde el precio de hoy. Bonos: precio en USD MEP (data912). Merval USD: S&P Merval dividido por el CCL; con 0 % usa el máximo de enero 2025 y con 100 % el promedio 2020-2023.";
+  document.getElementById("nesc").textContent="Precio de cada escenario interpolado entre tus precios objetivo con 0 % y 100 % de probabilidad (config.json). Up/Down: ganancia o pérdida desde el precio de hoy. Bonos: precio limpio (sin intereses corridos) en dólar cable/CCL (data912). Merval USD: S&P Merval dividido por el CCL; con 0 % usa el máximo de enero 2025 y con 100 % el promedio 2020-2023.";
 })();
 
 // Reservas netas
