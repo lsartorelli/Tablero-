@@ -45,12 +45,13 @@ CONFIG_DEFECTO = {
     "escenarios": {
         "_ayuda": "precio_0 y precio_100 son tus precios objetivo con 0 % y 100 % de probabilidad. "
                   "fuente: bono (data912), yahoo (ticker de Yahoo Finance) o merval_usd (Merval / CCL). "
-                  "precio (solo bonos): limpio_ccl, sucio_ccl, limpio_mep o sucio_mep.",
-        "filas": [0, 10, 20, 40, 45, 100],
+                  "precio (solo bonos): limpio_ccl, sucio_ccl, limpio_mep o sucio_mep. "
+                  "escala (Merval): multiplica el Merval en dólares CCL para llevarlo a la unidad de tus objetivos.",
+        "filas": [0, 20, 30, 45, 50, 100],
         "activos": [
             {"nombre": "GD38", "fuente": "bono", "simbolo": "GD38", "precio": "limpio_ccl", "precio_0": 85.59, "precio_100": 45.0},
-            {"nombre": "GD35", "fuente": "bono", "simbolo": "GD35", "precio": "limpio_ccl", "precio_0": 83.25, "precio_100": 45.0},
-            {"nombre": "Merval USD", "fuente": "merval_usd", "simbolo": "^MERV", "precio_0": 2380, "precio_100": 475}
+            {"nombre": "GD35", "fuente": "bono", "simbolo": "GD35", "precio": "limpio_ccl", "precio_0": 83.08, "precio_100": 45.0},
+            {"nombre": "Merval", "fuente": "merval_usd", "simbolo": "^MERV", "escala": 0.03144, "precio_0": 82, "precio_100": 20}
         ]
     },
     "preocupaciones": {
@@ -642,7 +643,7 @@ def precio_activo(a, bonos_cache, ccl):
         return float(get_json(YAHOO_URL.format(t=urllib.parse.quote(sim)))["chart"]["result"][0]["meta"]["regularMarketPrice"])
     if f == "merval_usd":
         merv = float(get_json(YAHOO_URL.format(t="%5EMERV"))["chart"]["result"][0]["meta"]["regularMarketPrice"])
-        return merv / ccl if ccl else None
+        return merv / ccl * float(a.get("escala", 1)) if ccl else None
     return None
 
 # Cierres informados por el BCRA que la API todavía no publicaba al armar el script.
@@ -1294,6 +1295,41 @@ def main():
                                 "arg_local": float(arg["local_price"]) if arg else None, "arg_tc": float(arg["dollar_ex"]) if arg else None}
     except Exception as e:
         aviso(f"no se pudo traer el índice Big Mac ({e})")
+    try:  # Salario registrado real por mandato (RIPTE deflactado por el IPC empalmado; 100 = mes de asunción)
+        # Desde 2015: índice de salarios registrados del INDEC. Para el mandato de 2011 (antes de que exista):
+        # remuneración promedio de los asalariados privados registrados (SIPA), sin el aguinaldo de junio y diciembre.
+        js = get_json(SERIES_URL.format(ids="149.1_SOR_PRIADO_OCTU_0_25,153.1_RNERACIDIO_2009_M_21") + "&start_date=2011-01-01")
+        cs = {m.get("field", {}).get("id"): i for i, m in enumerate(js["meta"])}
+        indec_w = {r[0][:7]: r[cs["149.1_SOR_PRIADO_OCTU_0_25"]] for r in js["data"] if r[cs["149.1_SOR_PRIADO_OCTU_0_25"]]}
+        sipa = {r[0][:7]: r[cs["153.1_RNERACIDIO_2009_M_21"]] for r in js["data"] if r[cs["153.1_RNERACIDIO_2009_M_21"]]}
+        sipa_s = {}
+        for k, v in sipa.items():
+            if k[5:] in ("06", "12"):
+                a_, s_ = sipa.get(_mes_ant(k)), sipa.get(_mes_sig(k))
+                v = (a_ + s_) / 2 if a_ and s_ else v / 1.5
+            sipa_s[k] = v
+        ipc_e = ipc_empalmado()
+        for x in inflacion.get("mensual", []):  # extiende con el último IPC del INDEC si hace falta
+            if x["mes"] not in ipc_e and _mes_ant(x["mes"]) in ipc_e:
+                ipc_e[x["mes"]] = ipc_e[_mes_ant(x["mes"])] * (1 + x["valor"] / 100)
+        mand = {}
+        # Mes 0 = noviembre previo a la asunción (último mes completo del gobierno anterior)
+        for nombre, ini in (("CFK 2011", "2011-11"), ("Macri 2015", "2015-11"), ("A. Fernández 2019", "2019-11"), ("Milei 2023", "2023-11")):
+            ripte = sipa_s if ini < "2015-10" else indec_w
+            if ini not in ripte or ini not in ipc_e:
+                continue
+            base = ripte[ini] / ipc_e[ini]
+            serie_m, k = [], ini
+            for i in range(49):
+                if k in ripte and k in ipc_e:
+                    serie_m.append(round(ripte[k] / ipc_e[k] / base * 100, 1))
+                else:
+                    break
+                k = _mes_sig(k)
+            mand[nombre] = {"inicio": ini, "serie": serie_m}
+        historicos["salario_mandatos"] = mand
+    except Exception as e:
+        aviso(f"no se pudo armar el salario real por mandato ({e})")
     try:  # Brasil: reservas internacionales y dólar (Banco Central do Brasil, series SGS 13621 y 1)
         sgs = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.{id}/dados?formato=json&dataInicial={d}"
         conv = lambda f: f[6:10] + "-" + f[3:5] + "-" + f[0:2]
@@ -1876,6 +1912,13 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <p class="n" id="nsal" style="margin:8px 0 0"></p>
   </section>
 
+  <section data-sec="ipc" class="panel" id="psm">
+    <div class="phead"><h2>Salario registrado ajustado por inflación por mandato (100 = mes previo a la asunción)</h2></div>
+    <div class="gobs" id="smcards"></div>
+    <div class="chartbox" style="height:380px"><canvas id="c29" aria-label="Salario registrado real desde el inicio de cada mandato presidencial"></canvas></div>
+    <p class="n" id="nsm" style="margin:8px 0 0"></p>
+  </section>
+
   <section data-sec="ipc" class="panel" id="ppob">
     <div class="phead"><h2>Pobreza e indigencia: personas bajo cada línea (%), últimos 20 años</h2></div>
     <div class="gobs" id="pobcards" style="grid-template-columns:repeat(5,minmax(0,1fr))"></div>
@@ -2286,6 +2329,30 @@ function salarios(){
 }
 document.querySelectorAll("[data-sal]").forEach(b=>b.onclick=()=>{salVista=b.dataset.sal;document.querySelectorAll("[data-sal]").forEach(x=>x.setAttribute("aria-pressed",x===b));salarios();});
 
+// Salario real por mandato
+let c29;
+function salarioMandatos(){
+  const M=(D.historicos||{}).salario_mandatos, panel=document.getElementById("psm");
+  if(!M||!Object.keys(M).length){panel.style.display="none";return;}
+  const COL={"CFK 2011":"#3a8ee6","Macri 2015":"#ffb000","A. Fernández 2019":"#00d26a","Milei 2023":"#b388ff"};
+  const n=Math.max(...Object.values(M).map(x=>x.serie.length)), L=Array.from({length:n},(_,i)=>`Mes ${i}`);
+  const noms=Object.keys(M), m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  const lab=[[0,0,"100","#ffffff"]];
+  noms.forEach((k,di)=>{const S=M[k].serie, iU=S.length-1; lab.push([di,iU,fmt(S[iU],0),COL[k]]);});
+  c29?.destroy();
+  c29=new Chart(document.getElementById("c29"),{type:"line",data:{labels:L,datasets:noms.map(k=>({label:k,data:M[k].serie,borderColor:COL[k],backgroundColor:COL[k],
+      borderWidth:k.startsWith("Milei")?3.5:2.2,pointRadius:0,tension:.2}))},
+    options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
+      plugins:{legend:{labels:{color:m,boxWidth:12,font}},etiquetas:{lista:lab},tooltip:{callbacks:{label:it=>`${it.dataset.label}: ${fmt(it.raw,1)}`}}},
+      scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:13,maxRotation:0}},y:{grid:{color:g},ticks:{color:m,font}}}},plugins:[etiquetas]});
+  const mi=M["Milei 2023"];
+  document.getElementById("smcards").innerHTML=noms.map(k=>{const S=M[k].serie, iU=S.length-1, eq=mi?Math.min(iU,mi.serie.length-1):iU;
+      return `<div style="--c:${COL[k]}"><div class="nm">${k.toUpperCase()}</div><div class="pc">${fmt(S[iU],0)}</div>
+        <div class="rg">mes ${iU}${k!=="Milei 2023"&&mi?` · en el mes ${mi.serie.length-1}: ${fmt(S[mi.serie.length-1],0)}`:""}</div></div>`;}).join("");
+  document.getElementById("nsm").textContent=`Poder de compra del salario registrado mes a mes desde la asunción de cada presidente, deflactado por inflación (INDEC; IPC de San Luis entre 2007 y 2016). Desde 2015 se usa el índice de salarios del sector privado registrado del INDEC; para el mandato de 2011, que es anterior, la remuneración promedio de los asalariados privados registrados (SIPA) sin aguinaldo. El mes 0 es noviembre, el último mes completo antes de cada asunción; arriba de 100, el salario real está mejor que al inicio del mandato. La caída de diciembre 2023 refleja el salto inflacionario de la devaluación. Para 2011-2015 la inflación se mide con el IPC de San Luis (el INDEC estaba intervenido): con el IPC oficial de entonces, el salario real de ese mandato daría bastante más alto. Fuentes: INDEC y Secretaría de Trabajo (SIPA) vía datos.gob.ar.`;
+}
+setTimeout(salarioMandatos,0);
+
 // Etiquetas sobre puntos elegidos: options.plugins.etiquetas = [[datasetIndex, pointIndex, texto, color]]
 const etiquetas={id:"etiquetas",afterDatasetsDraw(ch,_,o){const L=o&&o.lista; if(!L) return; const {ctx}=ch; ctx.save(); ctx.font='bold 11px "IBM Plex Mono",monospace';
   L.forEach(([di,pi,txt,col,arriba])=>{const meta=ch.getDatasetMeta(di); const pt=meta&&meta.data[pi]; if(!pt||meta.hidden) return;
@@ -2613,7 +2680,7 @@ function servicios(){
   document.getElementById("nserv").textContent=`Último: USD ${fmt(u[i],0)} M en los 12 meses a ${mesCorto(u[0])}${a?`, ${fmt((u[i]/a[i]-1)*100,0)} % más que un año antes`:""}. Son los dólares que ingresan por el mercado de cambios por cada servicio (balance cambiario del BCRA), por eso pueden diferir de las estadísticas del INDEC. Fuente: BCRA vía datos.gob.ar.`;
 }
 document.querySelectorAll("[data-sv]").forEach(b=>b.onclick=()=>{svVista=b.dataset.sv;document.querySelectorAll("[data-sv]").forEach(x=>x.setAttribute("aria-pressed",x===b));servicios();});
-setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();},0);
+setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();salarioMandatos();},0);
 
 // Semáforo de actividad
 function semaforoTabla(){
@@ -2780,7 +2847,7 @@ function celda(v){
   h+=`<tr class="prob"><td>Prob implícita</td>${A.map(a=>{if(a.precio==null) return `<td>–</td><td></td>`;
     const pr=(a.p0-a.precio)/(a.p0-a.p100)*100; return `<td class="pv">${fmt(pr,1)} %</td><td></td>`;}).join("")}</tr></tbody>`;
   t.innerHTML=h;
-  document.getElementById("nesc").textContent="Precio de cada escenario interpolado entre tus precios objetivo con 0 % y 100 % de probabilidad (config.json). Up/Down: ganancia o pérdida desde el precio de hoy. Bonos: precio limpio (sin intereses corridos) en dólar cable/CCL (data912). Merval USD: S&P Merval dividido por el CCL; con 0 % usa el máximo de enero 2025 y con 100 % el promedio 2020-2023.";
+  document.getElementById("nesc").textContent="Precio de cada escenario interpolado entre tus precios objetivo con 0 % y 100 % de probabilidad (config.json). Up/Down: ganancia o pérdida desde el precio de hoy. Bonos: precio limpio (sin intereses corridos) en dólar cable/CCL (data912). Merval: S&P Merval dividido por el CCL, multiplicado por la escala de config.json para llevarlo a la unidad de tus objetivos (82 y 20).";
 })();
 
 // Reservas netas
@@ -2858,7 +2925,7 @@ function render(){
 
 }
 document.querySelectorAll("[data-mode]").forEach(b=>b.onclick=()=>{mode=b.dataset.mode;document.querySelectorAll("[data-mode]").forEach(x=>x.setAttribute("aria-pressed",x===b));render();});
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();inflacion();});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();salarioMandatos();inflacion();});
 render();
 function avisos(){const A=D.avisos||[], el=document.getElementById("avisos"); el.innerHTML=A.length?`<section class="panel" style="border-color:var(--bad)"><div class="k" style="color:var(--bad)">Avisos de la última actualización</div><ul class="n" style="margin:6px 0 0;padding-left:18px">${A.map(a=>`<li>${a.replace(/</g,"&lt;")}</li>`).join("")}</ul></section>`:"";}
 avisos();
@@ -2891,7 +2958,7 @@ document.addEventListener("keydown",e=>{ if(e.target.tagName==="SELECT"||e.targe
 })();
 (function reloj(){const el=document.getElementById("clk"); const f=()=>{el.textContent=new Date().toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})+" ART";}; f(); setInterval(f,30000);})();
 // Redibuja cuando termina de cargar la tipografía, para que las etiquetas midan bien
-if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();inflacion();});
+if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();salarioMandatos();inflacion();});
 // Recarga la página cada 10 minutos para tomar la última versión generada
 // Recarga salteando la caché del navegador (agrega ?t=… al link)
 const recargar=()=>location.replace(location.pathname+"?t="+Date.now()+location.hash);
