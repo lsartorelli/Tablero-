@@ -1556,7 +1556,12 @@ header select option{color:#fff;background:#000}
 @media (max-width:700px){.fk button{padding:8px 11px;font-size:13px;flex:1 1 auto}}
 .fk button b{color:var(--amb);margin-right:4px}
 .fk button[aria-pressed="true"]{background:var(--amb);color:#000}.fk button[aria-pressed="true"] b{color:#000}
-.tick{white-space:nowrap;overflow-x:auto;margin:0 -8px;padding:5px 10px;border-bottom:1px solid #222;background:#050505;color:#ccc;font-size:12px}
+.tick{white-space:nowrap;overflow:hidden;margin:0 -8px;padding:5px 0;border-bottom:1px solid #222;background:#050505;color:#ccc;font-size:12px;position:relative}
+.tick-track{display:inline-flex;width:max-content;animation:cinta var(--dur,60s) linear infinite;will-change:transform}
+.tick-track>div{display:inline-flex;padding-left:10px}
+.tick:hover .tick-track,.tick:focus-within .tick-track{animation-play-state:paused}
+@keyframes cinta{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+@media (prefers-reduced-motion:reduce){.tick{overflow-x:auto}.tick-track{animation:none}}
 .tick b{color:var(--amb);margin-right:4px}.tick span.t{margin-right:22px}
 .status{color:#777;font-size:11.5px;margin:6px 0 0}.status b{color:var(--ink)}
 .panel,.stat,.ind>div,.dol>div,.cmp,.cmp.neg{background:var(--panel)!important;border:1px solid var(--line)!important;border-radius:0!important;box-shadow:none}
@@ -2879,7 +2884,10 @@ document.addEventListener("keydown",e=>{ if(e.target.tagName==="SELECT"||e.targe
   if(mp) it.push(`<span class="t"><b>MEP</b>${fmt(mp.precio,2)}</span>`); if(cc) it.push(`<span class="t"><b>CCL</b>${fmt(cc.precio,2)}</span>`); if(bl) it.push(`<span class="t"><b>BLUE</b>${fmt(bl.precio,2)}</span>`);
   (D.bonos||[]).forEach(g=>g.filas.filter(r=>["AL30","GD30","GD35","GD38"].includes(r.t)).forEach(r=>it.push(`<span class="t"><b>${r.t}</b>${fmt(r.precio,2)} <span class="${r.d1>0?"up":r.d1<0?"down":""}">${r.d1!=null?(r.d1>0?"+":"")+fmt(r.d1,2)+"%":""}</span></span>`)));
   (D.adrs||[]).filter(r=>["GGAL","YPF","PAM","BMA"].includes(r.t)).forEach(r=>it.push(`<span class="t"><b>${r.t}</b>${fmt(r.precio,2)} <span class="${r.d1>0?"up":r.d1<0?"down":""}">${r.d1!=null?(r.d1>0?"+":"")+fmt(r.d1,2)+"%":""}</span></span>`));
-  document.getElementById("tick").innerHTML=it.join("");
+  // cinta animada: el contenido va dos veces para que el desplazamiento sea continuo
+  const el=document.getElementById("tick"), bloque=`<div>${it.join("")}</div>`;
+  el.innerHTML=`<div class="tick-track">${bloque}${bloque.replace("<div>",'<div aria-hidden="true">')}</div>`;
+  requestAnimationFrame(()=>{const w=el.querySelector(".tick-track>div").offsetWidth; el.style.setProperty("--dur",Math.max(20,w/60)+"s");});  // ~60 px por segundo
 })();
 (function reloj(){const el=document.getElementById("clk"); const f=()=>{el.textContent=new Date().toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})+" ART";}; f(); setInterval(f,30000);})();
 // Redibuja cuando termina de cargar la tipografía, para que las etiquetas midan bien
