@@ -542,6 +542,41 @@ def _re_num(v):
         return False
 
 
+def pobreza_indec(hoy):
+    """Cuadro 1 del informe de pobreza del INDEC (personas pobres e indigentes, 2S-2016 en adelante).
+    El archivo cambia de nombre en cada publicación (marzo y septiembre): se prueba del más nuevo al más viejo."""
+    import xlrd
+    for y in range(hoy.year, hoy.year - 3, -1):
+        for mm in ("09", "03"):
+            if dt.date(y, int(mm), 1) > hoy:
+                continue
+            try:
+                datos = get_bytes(f"https://www.indec.gob.ar/ftp/cuadros/sociedad/cuadros_informe_pobreza_{mm}_{str(y)[2:]}.xls")
+                hoja = xlrd.open_workbook(file_contents=datos).sheet_by_name("Cuadro 1")
+            except Exception:
+                continue
+            enc = next(r for r in range(hoja.nrows) if str(hoja.cell_value(r, 0)).strip().lower() == "indicador")
+            cols = []
+            for c in range(1, hoja.ncols):
+                t = str(hoja.cell_value(enc, c)).lower()
+                ma = __import__("re").search(r"(20\d\d)", t)
+                anio = ma.group(1) if ma else ""
+                if anio:
+                    sem = 1 if ("1er" in t or "primer" in t) else 2
+                    cols.append((c, f"{sem}S-{anio[2:]}", f"{anio}-07-01" if sem == 1 else f"{int(anio) + 1}-01-01"))
+            out, bloque = {}, None
+            for r in range(enc + 1, hoja.nrows):
+                a = str(hoja.cell_value(r, 0)).strip().lower()
+                if a in ("pobreza", "indigencia"):
+                    bloque = a
+                elif a.startswith("personas") and bloque and bloque not in out:
+                    out[bloque] = [[et, round(float(hoja.cell_value(r, c)), 1), f] for c, et, f in cols
+                                   if isinstance(hoja.cell_value(r, c), float) or str(hoja.cell_value(r, c)).replace(".", "").isdigit()]
+            if out.get("indigencia"):
+                return out
+    return {}
+
+
 def dia_habil_siguiente(d):
     d += dt.timedelta(days=1)
     while d.weekday() >= 5:
@@ -1165,6 +1200,20 @@ def main():
             y, m = int(f[:4]), int(f[5:7])
             pre.append([f"1S-{str(y)[2:]}" if m == 7 else f"2S-{str(y - 1)[2:]}", v, f, "CEDLAS"])
         historicos["pobreza"] = pre + pob
+        try:
+            pi = pobreza_indec(hoy)
+            if pi.get("indigencia"):
+                historicos["indigencia"] = pi["indigencia"]
+                # el Excel del INDEC sale el mismo día del informe: completa la pobreza si datos.gob.ar viene atrasado
+                ya = {x[0] for x in historicos["pobreza"]}
+                for et, v, f in pi.get("pobreza", []):
+                    if et not in ya:
+                        historicos["pobreza"].append([et, v, f, "INDEC"])
+                historicos["pobreza"].sort(key=lambda x: x[2])
+        except ImportError:
+            aviso("para tener la indigencia instalá xlrd: pip install xlrd")
+        except Exception as e:
+            aviso(f"no se pudo leer el informe de pobreza del INDEC ({e})")
     except Exception as e:
         aviso(f"no se pudo traer la serie de pobreza ({e})")
     try:  # cobros de servicios en el mercado de cambios (balance cambiario del BCRA), suma móvil 12 meses
@@ -1823,8 +1872,8 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
   </section>
 
   <section data-sec="ipc" class="panel" id="ppob">
-    <div class="phead"><h2>Pobreza: personas bajo la línea de pobreza (%), últimos 20 años</h2></div>
-    <div class="gobs" id="pobcards"></div>
+    <div class="phead"><h2>Pobreza e indigencia: personas bajo cada línea (%), últimos 20 años</h2></div>
+    <div class="gobs" id="pobcards" style="grid-template-columns:repeat(5,minmax(0,1fr))"></div>
     <div class="chartbox" style="height:340px"><canvas id="c16" aria-label="Porcentaje de personas bajo la línea de pobreza por semestre, según la EPH del INDEC"></canvas></div>
     <p class="n" id="npob" style="margin:8px 0 0"></p>
   </section>
@@ -2633,20 +2682,26 @@ function pobreza(){
   const L=P.map(x=>x[0]), V=P.map(x=>x[1]);
   const corte=P.findIndex(x=>x[3]==="INDEC");
   c16?.destroy();
-  c16=new Chart(document.getElementById("c16"),{type:"bar",data:{labels:L,datasets:[{label:"Pobreza",data:V,backgroundColor:P.map(x=>colGob(x[2])+(x[3]==="CEDLAS"?"99":"")),borderColor:P.map(x=>colGob(x[2])),borderWidth:P.map(x=>x[3]==="CEDLAS"?1.5:0),borderRadius:0}]},
-    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},
+  const IND=Object.fromEntries(((D.historicos||{}).indigencia||[]).map(x=>[x[0],x[1]]));
+  const hayInd=Object.keys(IND).length>0;
+  c16=new Chart(document.getElementById("c16"),{type:"bar",data:{labels:L,datasets:[
+    ...(hayInd?[{type:"line",label:"Indigencia",data:L.map(x=>IND[x]??null),borderColor:"#ffffff",backgroundColor:"#ffffff",borderWidth:2.5,pointRadius:3,spanGaps:false,order:0,tension:.2}]:[]),
+    {label:"Pobreza",order:1,data:V,backgroundColor:P.map(x=>colGob(x[2])+(x[3]==="CEDLAS"?"99":"")),borderColor:P.map(x=>colGob(x[2])),borderWidth:P.map(x=>x[3]==="CEDLAS"?1.5:0),borderRadius:0}]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:hayInd,labels:{color:m,boxWidth:12,font,filter:it=>it.text==="Indigencia"}},
       lineasVert:{marcas:corte>0?[[corte-0.5,"SERIE OFICIAL INDEC →"]]:[]},
-      tooltip:{callbacks:{label:it=>it.raw==null?"sin dato":`${fmt(it.raw,1)} % de las personas (${P[it.dataIndex][3]==="CEDLAS"?"CEDLAS, serie comparable":"INDEC"})`}}},
+      tooltip:{callbacks:{label:it=>it.raw==null?(it.dataset.label==="Indigencia"?null:"sin dato"):it.dataset.label==="Indigencia"?`Indigencia: ${fmt(it.raw,1)} % de las personas`:`Pobreza: ${fmt(it.raw,1)} % de las personas (${P[it.dataIndex][3]==="CEDLAS"?"CEDLAS, serie comparable":"INDEC"})`}}},
       scales:{x:{grid:{display:false},ticks:{color:m,font,maxRotation:90,autoSkip:false}},y:{beginAtZero:true,grid:{color:g},ticks:{color:m,font,callback:v=>v+" %"}}}},plugins:[lineasVert]});
   const u=P[P.length-1], a=P[P.length-2], ia=P.find(x=>x[0]===u[0].replace(/\d\d$/,d=>String(+d-1).padStart(2,"0")));
   const OK=P.filter(x=>x[1]!=null), max=OK.reduce((p,x)=>x[1]>p[1]?x:p), min=OK.reduce((p,x)=>x[1]<p[1]?x:p);
   const pp=(x,y)=>{const d=x-y;return `${d>0?"+":""}${fmt(d,1)} pp`;};
   document.getElementById("pobcards").innerHTML=
     `<div style="--c:#ffb000"><div class="nm">ÚLTIMO DATO (${u[0]})</div><div class="pc">${fmt(u[1],1)} %</div><div class="ab">${pp(u[1],a[1])} vs ${a[0]}</div><div class="rg">${ia?pp(u[1],ia[1])+" vs "+ia[0]:""}</div></div>`+
+    (hayInd?(()=>{const ks=Object.keys(IND), lab=L.filter(x=>IND[x]!=null), uI=lab[lab.length-1], aI=lab[lab.length-2], mxI=lab.reduce((a,b)=>IND[b]>IND[a]?b:a);
+      return `<div style="--c:#ffffff"><div class="nm">INDIGENCIA (${uI})</div><div class="pc">${fmt(IND[uI],1)} %</div><div class="ab">${pp(IND[uI],IND[aI])} vs ${aI}</div><div class="rg">máximo ${fmt(IND[mxI],1)} % (${mxI})</div></div>`;})():"")+
     `<div style="--c:#ff3b3b"><div class="nm">MÁXIMO 20 AÑOS</div><div class="pc">${fmt(max[1],1)} %</div><div class="rg">${max[0]}</div></div>`+
     `<div style="--c:#00d26a"><div class="nm">MÍNIMO 20 AÑOS</div><div class="pc">${fmt(min[1],1)} %</div><div class="rg">${min[0]}</div></div>`+
     `<div style="--c:#7f8ea3"><div class="nm">GOBIERNOS</div><div class="rg" style="margin-top:6px;line-height:1.7"><span style="color:#7f8ea3">■</span> N. Kirchner · <span style="color:#3a8ee6">■</span> C. Fernández<br><span style="color:#ffb000">■</span> Macri · <span style="color:#00d26a">■</span> A. Fernández · <span style="color:#b388ff">■</span> Milei</div></div>`;
-  document.getElementById("npob").textContent=`Porcentaje de personas en hogares con ingresos por debajo de la canasta básica total, por semestre (1S: enero a junio; 2S: julio a diciembre), en los 31 aglomerados urbanos de la EPH. Barras translúcidas (2006-2015): serie comparable de CEDLAS-UNLP, que aplica la metodología actual del INDEC a la EPH con índices de precios alternativos para 2007-2015, cuando el INDEC estuvo intervenido; el 2.º semestre de 2015 no tiene dato. Desde el 2.º trimestre de 2016: serie oficial del INDEC, que se publica en marzo y septiembre. Fuentes: CEDLAS-UNLP, INDEC vía datos.gob.ar.`;
+  document.getElementById("npob").textContent=`Porcentaje de personas en hogares con ingresos por debajo de la canasta básica total, por semestre (1S: enero a junio; 2S: julio a diciembre), en los 31 aglomerados urbanos de la EPH. Barras translúcidas (2006-2015): serie comparable de CEDLAS-UNLP, que aplica la metodología actual del INDEC a la EPH con índices de precios alternativos para 2007-2015, cuando el INDEC estuvo intervenido; el 2.º semestre de 2015 no tiene dato. Desde el 2.º trimestre de 2016: serie oficial del INDEC, que se publica en marzo y septiembre. La línea blanca es la indigencia (ingresos por debajo de la canasta básica alimentaria), disponible desde el 2.º semestre de 2016. Fuentes: CEDLAS-UNLP, INDEC (informe de pobreza y datos.gob.ar).`;
 }
 pobreza();
 
