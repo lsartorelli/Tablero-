@@ -39,7 +39,27 @@ MANUAL = os.path.join(BASE, "datos_manuales.json")
 SALIDA = os.path.join(BASE, "grafico_bcra.html")
 CONFIG = os.path.join(BASE, "config.json")
 HIST_LOCAL = os.path.join(BASE, "historial_bonos.json")
-DOLARES_BONOS = {}  # fecha -> (MEP, CCL) implícitos en el AL30  # cierres que guarda el script para bonos sin histórico en data912
+DOLARES_BONOS = {}  # fecha -> (MEP, CCL) implícitos en el AL30
+BLUE_ARCHIVO = os.path.join(BASE, "historial_blue.json")
+DOLARAPI_BLUE = "https://dolarapi.com/v1/dolares/blue"  # API pública, se actualiza durante el día
+
+
+def blue_actual(hoy):
+    """Blue del momento (DolarAPI). Guarda el último valor de cada día para poder comparar contra el día anterior."""
+    try:
+        with open(BLUE_ARCHIVO, encoding="utf-8") as f:
+            hist = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        hist = {}
+    x = get_json(DOLARAPI_BLUE)
+    ts = dt.datetime.fromisoformat(x["fechaActualizacion"].replace("Z", "+00:00")).astimezone(dt.timezone(dt.timedelta(hours=-3)))
+    f = ts.date().isoformat()
+    if ts.date().weekday() < 5:
+        hist[f] = float(x["venta"])
+    hist = dict(sorted((k, v) for k, v in hist.items() if k > (hoy - dt.timedelta(days=90)).isoformat()))
+    with open(BLUE_ARCHIVO, "w", encoding="utf-8") as fo:
+        json.dump(hist, fo, ensure_ascii=False, indent=1)
+    return f, float(x["venta"]), hist  # cierres que guarda el script para bonos sin histórico en data912
 
 # Valores por defecto de config.json (se crea solo la primera vez; después editás ese archivo)
 CONFIG_DEFECTO = {
@@ -597,6 +617,13 @@ def dolares_de_bonos(hoy):
     return dict(sorted(serie.items()))
 
 
+def _dia_habil_anterior(f):
+    d = dt.date.fromisoformat(f) - dt.timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= dt.timedelta(days=1)
+    return d.isoformat()
+
+
 def dia_habil_siguiente(d):
     d += dt.timedelta(days=1)
     while d.weekday() >= 5:
@@ -935,6 +962,20 @@ def main():
                                             "brecha": (bon[f][i] / may_a(f) - 1) * 100 if may_a(f) else None} for f in fs]
         except Exception as e:
             aviso(f"no se pudo calcular el MEP y el CCL con el AL30 ({e})")
+        try:  # blue del momento desde DolarAPI; el anterior, del historial propio o de ArgentinaDatos
+            fb, vb, hb = blue_actual(hoy)
+            prev = [(k, v) for k, v in hb.items() if k < fb]
+            if not prev:
+                ad = [x for x in get_json(DOLARES_URL.format(casa="blue")) if dt.date.fromisoformat(x["fecha"]).weekday() < 5]
+                ant_ = _dia_habil_anterior(fb)
+                # ArgentinaDatos guarda cada cierre con la fecha del día siguiente: el de "fb" es el cierre de la rueda anterior
+                cand = [x for x in ad if x["fecha"] == fb] or [x for x in ad if x["fecha"] <= ant_]
+                if cand:
+                    prev = [(ant_, float(cand[-1]["venta"]))]
+            filas = [{"fecha": k, "precio": v, "brecha": (v / may_a(k) - 1) * 100 if may_a(k) else None} for k, v in (prev[-1:] + [(fb, vb)])]
+            dolar["brechas"]["blue"] = filas
+        except Exception as e:
+            aviso(f"no se pudo traer el blue de DolarAPI ({e})")
         for clave, casa in (("mep", "bolsa"), ("ccl", "contadoconliqui"), ("blue", "blue")):
             if clave in dolar["brechas"]:
                 continue
@@ -1974,7 +2015,7 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
   </section>
 
   <div id="avisos"></div>
-  <footer>Fuente: API de Estadísticas Monetarias v4.0 del BCRA (variable 78, compras de divisas; 1, reservas; 4, dólar minorista promedio vendedor; 44 y 7, TAMAR y BADLAR de bancos privados en TNA). Riesgo país: índice EMBI de JP Morgan vía Ámbito y ArgentinaDatos. Bandas: variables 1187 y 1188 del BCRA. Alimentos: precios medios del IPC del INDEC en GBA, deflactados por IPC GBA (datos.gob.ar). Brechas: MEP y CCL implícitos en el AL30 (data912) y blue (ArgentinaDatos), contra el mayorista A3500 del mismo día o, en la rueda en curso, el último publicado (variable 5). Las tasas se publican con un día hábil de rezago. Los días marcados como provisorios salen del cierre informado por el BCRA o de tu carga manual, y se reemplazan por el dato oficial en la próxima ejecución. Las ruedas se comparan por orden dentro de cada mes, no por fecha.</footer>
+  <footer>Fuente: API de Estadísticas Monetarias v4.0 del BCRA (variable 78, compras de divisas; 1, reservas; 4, dólar minorista promedio vendedor; 44 y 7, TAMAR y BADLAR de bancos privados en TNA). Riesgo país: índice EMBI de JP Morgan vía Ámbito y ArgentinaDatos. Bandas: variables 1187 y 1188 del BCRA. Alimentos: precios medios del IPC del INDEC en GBA, deflactados por IPC GBA (datos.gob.ar). Brechas: MEP y CCL implícitos en el AL30 (data912) y blue (DolarAPI, actualizado durante el día), contra el mayorista A3500 del mismo día o, en la rueda en curso, el último publicado (variable 5). Las tasas se publican con un día hábil de rezago. Los días marcados como provisorios salen del cierre informado por el BCRA o de tu carga manual, y se reemplazan por el dato oficial en la próxima ejecución. Las ruedas se comparan por orden dentro de cada mes, no por fecha.</footer>
 </div>
 <script>
 const D = /*__DATOS__*/null;
