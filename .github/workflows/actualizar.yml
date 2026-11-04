@@ -23,6 +23,7 @@ permissions:
   contents: write   # para guardar los datos en el repositorio
   pages: write      # para publicar la página
   id-token: write
+  deployments: write # para destrabar publicaciones que quedaron colgadas
 
 # Una sola ejecución a la vez: si llega otra, espera a que termine la anterior (así no chocan las publicaciones)
 concurrency:
@@ -79,6 +80,17 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - name: Destrabar publicaciones anteriores colgadas
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # GitHub a veces deja una publicación "en curso" que bloquea las nuevas: se cancelan las anteriores
+          shas=$(gh api "repos/${{ github.repository }}/deployments?environment=github-pages&per_page=20" --jq '.[].sha' 2>/dev/null | sort -u)
+          for sha in 29480815bfa27a69b3c7d480f2cb3a793ea1d52d $shas; do
+            [ "$sha" = "${{ github.sha }}" ] && continue
+            gh api -X POST "repos/${{ github.repository }}/pages/deployments/$sha/cancel" >/dev/null 2>&1 && echo "Cancelada: $sha" || true
+          done
+
       - name: Publicar en GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
