@@ -20,8 +20,11 @@ on:
         required: false
 
 permissions:
-  contents: write
+  contents: write   # para guardar los datos en el repositorio
+  pages: write      # para publicar la página
+  id-token: write
 
+# Una sola ejecución a la vez: si llega otra, espera a que termine la anterior (así no chocan las publicaciones)
 concurrency:
   group: tablero
   cancel-in-progress: false
@@ -39,7 +42,7 @@ jobs:
           python-version: "3.12"
 
       - name: Instalar dependencias
-        run: pip install xlrd
+        run: pip install xlrd pypdf
 
       - name: Generar tablero
         run: |
@@ -51,7 +54,7 @@ jobs:
           [ -n "${{ github.event.inputs.riesgo }}" ] && ARGS="$ARGS --riesgo ${{ github.event.inputs.riesgo }}"
           python grafico_bcra.py $ARGS
 
-      - name: Publicar cambios
+      - name: Guardar datos en el repositorio
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -60,3 +63,22 @@ jobs:
           git commit -m "Actualización automática $(date '+%d/%m %H:%M')"
           git pull --rebase
           git push
+
+      - name: Preparar publicación
+        uses: actions/configure-pages@v5
+
+      - name: Subir la página
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+  publicar:
+    needs: actualizar
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publicar en GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
