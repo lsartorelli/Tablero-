@@ -38,7 +38,8 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 MANUAL = os.path.join(BASE, "datos_manuales.json")
 SALIDA = os.path.join(BASE, "grafico_bcra.html")
 CONFIG = os.path.join(BASE, "config.json")
-HIST_LOCAL = os.path.join(BASE, "historial_bonos.json")  # cierres que guarda el script para bonos sin histórico en data912
+HIST_LOCAL = os.path.join(BASE, "historial_bonos.json")
+DOLARES_BONOS = {}  # fecha -> (MEP, CCL) implícitos en el AL30  # cierres que guarda el script para bonos sin histórico en data912
 
 # Valores por defecto de config.json (se crea solo la primera vez; después editás ese archivo)
 CONFIG_DEFECTO = {
@@ -578,6 +579,24 @@ def pobreza_indec(hoy):
     return {}
 
 
+def dolares_de_bonos(hoy):
+    """MEP y CCL implícitos en el AL30 (precio en pesos / precio en dólares MEP o cable), al cierre de cada rueda
+    y el último precio de hoy. Es la convención del mercado y, a diferencia de otras fuentes, cada dato queda en su fecha."""
+    serie = {}
+    h = {t: {x["date"]: x["c"] for x in get_json(HIST_BONO_URL.format(t=t)) if isinstance(x, dict) and x.get("c")}
+         for t in ("AL30", "AL30D", "AL30C")}
+    for f in h["AL30"]:
+        if f in h["AL30D"] and f in h["AL30C"]:
+            serie[f] = (h["AL30"][f] / h["AL30D"][f], h["AL30"][f] / h["AL30C"][f])
+    try:  # precio del momento (la rueda en curso todavía no figura en el histórico)
+        v = {x["symbol"]: x for x in get_json(BONOS_URL)}
+        if all(v.get(t, {}).get("c") for t in ("AL30", "AL30D", "AL30C")) and hoy.weekday() < 5:
+            serie[hoy.isoformat()] = (v["AL30"]["c"] / v["AL30D"]["c"], v["AL30"]["c"] / v["AL30C"]["c"])
+    except Exception:
+        pass
+    return dict(sorted(serie.items()))
+
+
 def dia_habil_siguiente(d):
     d += dt.timedelta(days=1)
     while d.weekday() >= 5:
@@ -907,9 +926,21 @@ def main():
             return may_por_fecha[max(ant)] if ant else None
 
         dolar["brechas"] = {}
+        try:
+            bon = dolares_de_bonos(hoy)
+            DOLARES_BONOS.update(bon)
+            fs = list(bon)[-2:]
+            for i, clave in ((0, "mep"), (1, "ccl")):
+                dolar["brechas"][clave] = [{"fecha": f, "precio": round(bon[f][i], 2),
+                                            "brecha": (bon[f][i] / may_a(f) - 1) * 100 if may_a(f) else None} for f in fs]
+        except Exception as e:
+            aviso(f"no se pudo calcular el MEP y el CCL con el AL30 ({e})")
         for clave, casa in (("mep", "bolsa"), ("ccl", "contadoconliqui"), ("blue", "blue")):
-            try:
-                hist = [x for x in get_json(DOLARES_URL.format(casa=casa)) if x["fecha"] >= corto][-2:]
+            if clave in dolar["brechas"]:
+                continue
+            try:  # blue (y respaldo de MEP/CCL): ArgentinaDatos, sin los fines de semana que repiten el viernes
+                hist = [x for x in get_json(DOLARES_URL.format(casa=casa)) if x["fecha"] >= corto
+                        and dt.date.fromisoformat(x["fecha"]).weekday() < 5][-2:]
                 filas = []
                 for x in hist:
                     m = may_a(x["fecha"])
@@ -920,10 +951,14 @@ def main():
                 aviso(f"no se pudo traer el dólar {casa} ({e})")
     except Exception as e:
         aviso(f"no se pudo traer el dólar mayorista o las bandas ({e})")
-    try:  # brecha CCL contra MEP, últimos 2 años
+    try:  # brecha CCL contra MEP, últimos 2 años, con el AL30 (cada dato en su rueda)
         desde_b = (hoy - dt.timedelta(days=730)).isoformat()
-        mep = {x["fecha"]: float(x["venta"]) for x in get_json(DOLARES_URL.format(casa="bolsa")) if x["fecha"] >= desde_b and x.get("venta")}
-        ccl_h = {x["fecha"]: float(x["venta"]) for x in get_json(DOLARES_URL.format(casa="contadoconliqui")) if x["fecha"] >= desde_b and x.get("venta")}
+        if DOLARES_BONOS:
+            mep = {f: v[0] for f, v in DOLARES_BONOS.items() if f >= desde_b}
+            ccl_h = {f: v[1] for f, v in DOLARES_BONOS.items() if f >= desde_b}
+        else:
+            mep = {x["fecha"]: float(x["venta"]) for x in get_json(DOLARES_URL.format(casa="bolsa")) if x["fecha"] >= desde_b and x.get("venta")}
+            ccl_h = {x["fecha"]: float(x["venta"]) for x in get_json(DOLARES_URL.format(casa="contadoconliqui")) if x["fecha"] >= desde_b and x.get("venta")}
         dolar["ccl_mep"] = [{"fecha": f, "valor": (ccl_h[f] / mep[f] - 1) * 100, "mep": mep[f], "ccl": ccl_h[f]}
                             for f in sorted(set(mep) & set(ccl_h))]
     except Exception as e:
@@ -1136,7 +1171,7 @@ def main():
                 if f < "2011-11-01" or ("2015-12-17" <= f < "2019-09-01"):
                     return 1.0  # sin cepo
                 fa = max((k for k in a_d if k <= f), default=None)
-                mk = mep_d.get(f) or ccl_d.get(f)
+                mk = (DOLARES_BONOS.get(f) or (None,))[0] or mep_d.get(f) or ccl_d.get(f)  # MEP del AL30 si existe
                 return mk / a_d[fa] if mk and fa else 1.0
             ref = ars_brl(f_ult) * brecha(f_ult)
             b_ult = brecha(f_ult)
@@ -1939,7 +1974,7 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
   </section>
 
   <div id="avisos"></div>
-  <footer>Fuente: API de Estadísticas Monetarias v4.0 del BCRA (variable 78, compras de divisas; 1, reservas; 4, dólar minorista promedio vendedor; 44 y 7, TAMAR y BADLAR de bancos privados en TNA). Riesgo país: índice EMBI de JP Morgan vía Ámbito y ArgentinaDatos. Bandas: variables 1187 y 1188 del BCRA. Alimentos: precios medios del IPC del INDEC en GBA, deflactados por IPC GBA (datos.gob.ar). Brechas: MEP, CCL y blue (ArgentinaDatos, precio de venta) contra el mayorista del mismo día (variable 5). Las tasas se publican con un día hábil de rezago. Los días marcados como provisorios salen del cierre informado por el BCRA o de tu carga manual, y se reemplazan por el dato oficial en la próxima ejecución. Las ruedas se comparan por orden dentro de cada mes, no por fecha.</footer>
+  <footer>Fuente: API de Estadísticas Monetarias v4.0 del BCRA (variable 78, compras de divisas; 1, reservas; 4, dólar minorista promedio vendedor; 44 y 7, TAMAR y BADLAR de bancos privados en TNA). Riesgo país: índice EMBI de JP Morgan vía Ámbito y ArgentinaDatos. Bandas: variables 1187 y 1188 del BCRA. Alimentos: precios medios del IPC del INDEC en GBA, deflactados por IPC GBA (datos.gob.ar). Brechas: MEP y CCL implícitos en el AL30 (data912) y blue (ArgentinaDatos), contra el mayorista A3500 del mismo día o, en la rueda en curso, el último publicado (variable 5). Las tasas se publican con un día hábil de rezago. Los días marcados como provisorios salen del cierre informado por el BCRA o de tu carga manual, y se reemplazan por el dato oficial en la próxima ejecución. Las ruedas se comparan por orden dentro de cada mes, no por fecha.</footer>
 </div>
 <script>
 const D = /*__DATOS__*/null;
@@ -2158,7 +2193,7 @@ function cclmep(){
       plugins:{legend:{labels:{color:m,boxWidth:12,font}},tooltip:{callbacks:{label:it=>`${it.dataset.label}: ${fmt(it.raw,2)} %`}}},
       scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:9,maxRotation:0}},y:{beginAtZero:true,grid:{color:g},ticks:{color:m,font,callback:v=>fmt(v)+" %"}}}}});
   const u=S[S.length-1], mx=P.reduce((a,b)=>b.valor>a.valor?b:a), mn=P.reduce((a,b)=>b.valor<a.valor?b:a);
-  document.getElementById("ncm").textContent=`Hoy ${fmt(u.valor,2)} %, promedio del período ${fmt(prom,2)} %, máximo ${fmt(mx.valor,2)} % (${dmy(mx.fecha)}), mínimo ${fmt(mn.valor,2)} % (${dmy(mn.fecha)}). CCL y MEP a precio de venta, ArgentinaDatos.`;
+  document.getElementById("ncm").textContent=`Hoy ${fmt(u.valor,2)} %, promedio del período ${fmt(prom,2)} %, máximo ${fmt(mx.valor,2)} % (${dmy(mx.fecha)}), mínimo ${fmt(mn.valor,2)} % (${dmy(mn.fecha)}). MEP y CCL implícitos en el AL30 al cierre de cada rueda (data912).`;
 }
 document.querySelectorAll("[data-cm]").forEach(b=>b.onclick=()=>{cmDias=+b.dataset.cm;document.querySelectorAll("[data-cm]").forEach(x=>x.setAttribute("aria-pressed",x===b));cclmep();});
 cclmep();
