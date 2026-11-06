@@ -932,6 +932,12 @@ def main():
                 rp_d[f"{y_}-{m_}-{d_}"] = float(v.replace(".", "").replace(",", "."))
         except Exception as e:
             aviso(f"Ámbito no devolvió el riesgo país ({e})")
+        try:  # valor del momento (el histórico de Ámbito llega hasta la rueda anterior)
+            vv = get_json("https://mercados.ambito.com//riesgopais/variacion")
+            d_, m_, y_ = vv["fecha"].split("-")
+            rp_d[f"{y_}-{m_}-{d_}"] = float(str(vv["ultimo"]).replace(".", "").replace(",", "."))
+        except Exception:
+            pass
         rp = sorted(({"fecha": f, "valor": v} for f, v in rp_d.items()), key=lambda x: x["fecha"])
     except Exception as e:
         aviso(f"no se pudo traer el riesgo país ({e})")
@@ -1501,6 +1507,14 @@ def main():
         aviso(f"no se pudieron leer las noticias del día ({e})")
     extras_prensa = [{"fecha": f, "compra": v.get("compra"), "reservas": v.get("reservas")} for f, v in sorted(prensa.items())]
     extras = SEED + extras_prensa + manuales  # lo cargado a mano tiene prioridad sobre la prensa
+    try:  # el gráfico de reelección usa exactamente el mismo riesgo país que la tarjeta de arriba (incluido el de hoy)
+        if "reeleccion" in historicos:
+            rmap = dict(historicos["reeleccion"]["riesgo"])
+            for x in mezclar(rp, "riesgo", extras):
+                rmap[x["fecha"]] = x["valor"]
+            historicos["reeleccion"]["riesgo"] = sorted(rmap.items())
+    except Exception:
+        pass
     compras = mezclar(api_c, "compra", extras)
     reservas = mezclar(api_r, "reservas", extras)
     datos = {
