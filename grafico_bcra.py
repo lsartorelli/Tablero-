@@ -662,6 +662,18 @@ ADRS = [("GGAL", "Grupo Galicia"), ("BMA", "Banco Macro"), ("BBAR", "BBVA Argent
         ("CRESY", "Cresud"), ("IRS", "IRSA"), ("CAAP", "Corporación América"), ("TX", "Ternium"),
         ("TS", "Tenaris"), ("MELI", "Mercado Libre"), ("GLOB", "Globant"), ("BIOX", "Bioceres")]
 VAR_INFL_M, VAR_INFL_IA = 27, 28  # inflación mensual e interanual (INDEC, vía BCRA)
+# Futuros de commodities e índices (Yahoo Finance). factor convierte la cotización a la unidad mostrada.
+MERCADOS_GLOBALES = [
+    ("Índices (futuros)", [("ES=F", "S&P 500", "puntos", 1), ("NQ=F", "Nasdaq 100", "puntos", 1),
+                            ("YM=F", "Dow Jones", "puntos", 1), ("RTY=F", "Russell 2000", "puntos", 1)]),
+    ("Energía", [("BZ=F", "Petróleo Brent", "USD/barril", 1), ("CL=F", "Petróleo WTI", "USD/barril", 1),
+                 ("NG=F", "Gas natural (Henry Hub)", "USD/MMBtu", 1)]),
+    ("Metales", [("GC=F", "Oro", "USD/onza", 1), ("SI=F", "Plata", "USD/onza", 1), ("HG=F", "Cobre", "USD/libra", 1)]),
+    ("Agro (Chicago)", [("ZS=F", "Soja", "USD/tonelada", 0.367437), ("ZC=F", "Maíz", "USD/tonelada", 0.393683),
+                        ("ZW=F", "Trigo", "USD/tonelada", 0.367437)]),
+    ("Otros", [("^VIX", "VIX (volatilidad)", "puntos", 1), ("DX-Y.NYB", "Índice dólar (DXY)", "puntos", 1),
+               ("^TNX", "Bono EE.UU. 10 años", "% anual", 1), ("BTC-USD", "Bitcoin", "USD", 1)]),
+]
 VAR_ENCAJES, VAR_BASE = 1256, 15  # cuenta corriente en moneda extranjera en el BCRA (millones de $), base monetaria
 
 
@@ -1154,6 +1166,28 @@ def main():
     except Exception as e:
         aviso(f"no se pudieron traer los bonos ({e})")
 
+    # --- Futuros de índices y commodities
+    mercados = []
+    try:
+        todos = [x[0] for _, g_ in MERCADOS_GLOBALES for x in g_]
+        sp = get_json(SPARK_URL.format(s=",".join(urllib.parse.quote(t) for t in todos)))
+        for grupo, items in MERCADOS_GLOBALES:
+            filas_m = []
+            for t, nombre, unidad, factor in items:
+                x = sp.get(t)
+                if not x:
+                    continue
+                c = [v for v in x["close"] if v is not None]
+                ult = x.get("fulldayPrice") or c[-1]
+                pc = lambda a: (ult / a - 1) * 100 if a else None
+                ts = max(v for v in x["timestamp"]) if x.get("timestamp") else None
+                filas_m.append({"t": t, "nombre": nombre, "unidad": unidad, "precio": ult * factor,
+                                "d1": x.get("fulldayChangePercent"), "d5": pc(c[-6] if len(c) > 5 else None),
+                                "m1": pc(c[-22] if len(c) > 21 else None), "ytd": pc(x.get("chartPreviousClose")), "ts": ts})
+            mercados.append({"grupo": grupo, "filas": filas_m})
+    except Exception as e:
+        aviso(f"no se pudieron traer los futuros de índices y commodities ({e})")
+
     # --- ADRs argentinos
     adrs = []
     try:
@@ -1586,6 +1620,7 @@ def main():
         "inflacion": inflacion,
         "bonos": bonos,
         "adrs": adrs,
+        "mercados": mercados,
         "reservasNetas": reservas_netas,
         "indicadores": {k: v[-2:] for k, v in
                         {"reservas": reservas, "riesgo": mezclar(rp, "riesgo", extras), "minorista": tc, "tamar": tamar, "badlar": badlar}.items()},
@@ -1808,7 +1843,7 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
   <header>
     <span class="cmdk">ARG</span>
     <h1>TABLERO ECONÓMICO ARGENTINO &lt;GO&gt;</h1>
-    <span class="sub">BCRA | FX | TASAS | BONOS | ADRS | IPC</span>
+    <span class="sub">BCRA | FX | TASAS | BONOS | MERCADOS | IPC</span>
     <span class="hdr-r"><label for="mes">MES</label> <select id="mes"></select> <span id="clk"></span> <span class="live">● LIVE</span></span>
   </header>
   <nav class="fk" id="fk" aria-label="Secciones">
@@ -1818,7 +1853,7 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <button type="button" data-tab="reservas" aria-pressed="false"><b>4)</b>RESERVAS</button>
     <button type="button" data-tab="fx" aria-pressed="false"><b>5)</b>FX/BANDAS</button>
     <button type="button" data-tab="bonos" aria-pressed="false"><b>6)</b>BONOS/POLÍTICA</button>
-    <button type="button" data-tab="adrs" aria-pressed="false"><b>7)</b>ADRS</button>
+    <button type="button" data-tab="adrs" aria-pressed="false"><b>7)</b>MERCADOS</button>
     <button type="button" data-tab="ipc" aria-pressed="false"><b>8)</b>IPC</button>
     <button type="button" data-tab="actividad" aria-pressed="false"><b>9)</b>ACTIVIDAD</button>
     <button type="button" data-tab="brasil" aria-pressed="false"><b>0)</b>BRASIL</button>
@@ -2042,6 +2077,12 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <div class="phead"><h2 id="mepbrt">Dólar MEP real ajustado por tipo de cambio real con Brasil</h2></div>
     <div class="chartbox" style="height:360px"><canvas id="c17" aria-label="Dólar MEP ajustado por el tipo de cambio real bilateral con Brasil desde 2001"></canvas></div>
     <p class="n" id="nmepbr" style="margin:8px 0 0"></p>
+  </section>
+
+  <section data-sec="adrs" class="panel" id="pmerc">
+    <div class="phead"><h2>Futuros de índices y commodities</h2><span class="n" id="mercts"></span></div>
+    <div class="tablewrap"><table class="mkt" id="tmerc"></table></div>
+    <p class="n" style="margin:8px 0 0">Último precio de los contratos de futuros más cercanos (el de los índices se negocia casi las 24 horas, también antes de que abra Wall Street). Soja, maíz y trigo pasados a dólares por tonelada. Variación del día contra el cierre anterior. Se actualiza con cada ejecución del tablero (cada 15 minutos en horario hábil), con unos 10 a 15 minutos de demora. Fuente: Yahoo Finance (CME, ICE, NYMEX, COMEX y CBOT).</p>
   </section>
 
   <section data-sec="adrs" class="panel" id="padr">
@@ -3014,6 +3055,14 @@ function celda(v){
   const a=Math.min(Math.abs(v)/15,1), base=v>=0?"--good":"--bad";
   return `<td class="pc" style="color:var(${base});background:color-mix(in srgb,var(${base}) ${Math.round(6+a*28)}%,transparent)">${v>0?"+":""}${fmt(v,2)} %</td>`;
 }
+(function mercadosGlobales(){
+  const G=D.mercados||[], t=document.getElementById("tmerc");
+  if(!G.some(g=>g.filas.length)){document.getElementById("pmerc").style.display="none";return;}
+  const dec=r=>r.precio>=1000?0:r.precio>=100?1:2;
+  t.innerHTML=`<thead><tr><th>Activo</th><th style="text-align:left">Unidad</th><th>Último</th><th>Día</th><th>5 días</th><th>1 mes</th><th>En el año</th></tr></thead><tbody>`+
+    G.map(g=>`<tr class="grp"><td colspan="7">${g.grupo}</td></tr>`+g.filas.map(r=>`<tr><td class="t">${r.nombre}</td><td class="nm">${r.unidad}</td><td class="val">${fmt(r.precio,dec(r))}</td>${celda(r.d1)}${celda(r.d5)}${celda(r.m1)}${celda(r.ytd)}</tr>`).join("")).join("")+"</tbody>";
+  document.getElementById("mercts").textContent="Actualizado: "+D.generado;
+})();
 (function mercados(){
   const B=D.bonos||[], A=D.adrs||[], cols="<th>Precio</th><th>1 día</th><th>5 días</th><th>1 mes</th><th>En el año</th>";
   if(B.some(g=>g.filas.length)){
