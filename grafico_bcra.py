@@ -624,6 +624,31 @@ def _dia_habil_anterior(f):
     return d.isoformat()
 
 
+SURTIDORES_URL = "https://surtidores.com.ar/precios/"  # tablas mensuales de precios YPF en CABA
+
+
+def nafta_ypf_caba():
+    """Precio mensual de la nafta súper y premium de YPF en CABA (Surtidores.com.ar)."""
+    import html as _h, re as _re
+    s_ = get_bytes(SURTIDORES_URL).decode("utf-8", "ignore")
+    t = _re.sub(r"\s+", " ", _h.unescape(_re.sub(r"<[^>]+>", " ", _re.sub(r"<script.*?</script>|<style.*?</style>", " ", s_, flags=_re.S))))
+    seg = t[t.find("Tabla de precios"):][:12000]
+    meses = "Enero Febrero Marzo Abril Mayo Junio Julio Agosto Septiembre Octubre Noviembre Diciembre"
+    partes = _re.split(r"(?:Tabla de precios )?(20\d\d) " + meses, seg)
+    out = {"super": {}, "premium": {}}
+    for k in range(1, len(partes), 2):
+        y, cuerpo = int(partes[k]), partes[k + 1]
+        for prod, clave in (("Super", "super"), ("Premium", "premium")):
+            m = _re.search(prod + r" ((?:[\d\.,]+ ?){1,12})", cuerpo)
+            if m:
+                for i, v in enumerate(m.group(1).split()):
+                    v = v.replace(",", ".")
+                    if v.count(".") > 1:
+                        v = v.replace(".", "", v.count(".") - 1)
+                    out[clave][f"{y}-{i + 1:02d}"] = float(v)
+    return {k: dict(sorted(v.items())) for k, v in out.items()}
+
+
 def dia_habil_siguiente(d):
     d += dt.timedelta(days=1)
     while d.weekday() >= 5:
@@ -701,7 +726,22 @@ SEED = [
 ]
 
 
-def get_json(url):
+def get_json(url, intentos=3):
+    """Descarga JSON; si el servidor da un error pasajero (5xx o corte), reintenta un par de veces."""
+    import time
+    for i in range(intentos):
+        try:
+            return _get_json(url)
+        except urllib.error.HTTPError as e:
+            if e.code < 500 or i == intentos - 1:
+                raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
+            if i == intentos - 1:
+                raise
+        time.sleep(3)
+
+
+def _get_json(url):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=40) as r:
@@ -1412,6 +1452,19 @@ def main():
         historicos["salario_mandatos"] = mand
     except Exception as e:
         aviso(f"no se pudo armar el salario real por mandato ({e})")
+    try:  # Brent (5 años, diario) y nafta YPF en CABA, en pesos y en dólares MEP
+        rb = get_json("https://query1.finance.yahoo.com/v8/finance/chart/BZ%3DF?range=5y&interval=1d")["chart"]["result"][0]
+        brent = {}
+        for t_, c_ in zip(rb["timestamp"], rb["indicators"]["quote"][0]["close"]):
+            if c_:
+                brent[dt.datetime.fromtimestamp(t_, dt.timezone.utc).date().isoformat()] = round(c_, 2)
+        nafta = nafta_ypf_caba()
+        mep_m = promedio_mensual((f, v[0]) for f, v in DOLARES_BONOS.items()) if DOLARES_BONOS else {}
+        if not mep_m:
+            mep_m = promedio_mensual((x["fecha"], float(x["venta"])) for x in get_json(DOLARES_URL.format(casa="bolsa")) if x.get("venta"))
+        historicos["energia"] = {"brent": sorted(brent.items()), "nafta": nafta, "mep": {k: round(v, 2) for k, v in mep_m.items()}}
+    except Exception as e:
+        aviso(f"no se pudieron traer el Brent o los precios de la nafta ({e})")
     try:  # Brasil: reservas internacionales y dólar (Banco Central do Brasil, series SGS 13621 y 1)
         sgs = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.{id}/dados?formato=json&dataInicial={d}"
         conv = lambda f: f[6:10] + "-" + f[3:5] + "-" + f[0:2]
@@ -1838,6 +1891,18 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <div class="gobs" id="mocards"></div>
     <div class="chartbox" style="height:360px"><canvas id="c28" aria-label="Ratio de irregularidad del crédito a familias y empresas"></canvas></div>
     <p class="n" id="nmo" style="margin:8px 0 0"></p>
+  </section>
+
+  <section data-sec="actividad" class="panel" id="pene">
+    <div class="phead"><h2 id="enet">Nafta en dólares vs Brent</h2>
+      <div class="seg" role="group" aria-label="Vista">
+        <button type="button" data-en="usd" aria-pressed="true">Nafta USD vs Brent (24 meses)</button>
+        <button type="button" data-en="brent" aria-pressed="false">Brent (5 años)</button>
+        <button type="button" data-en="pesos" aria-pressed="false">Nafta en pesos (5 años)</button>
+      </div></div>
+    <div class="gobs" id="encards"></div>
+    <div class="chartbox" style="height:420px"><canvas id="c30" aria-label="Precio de la nafta en dólares y del petróleo Brent"></canvas></div>
+    <p class="n" id="nene" style="margin:8px 0 0"></p>
   </section>
 
   <section data-sec="actividad" class="panel" id="pemae">
@@ -2447,6 +2512,7 @@ setTimeout(salarioMandatos,0);
 const etiquetas={id:"etiquetas",afterDatasetsDraw(ch,_,o){const L=o&&o.lista; if(!L) return; const {ctx}=ch; ctx.save(); ctx.font='bold 11px "IBM Plex Mono",monospace';
   L.forEach(([di,pi,txt,col,arriba])=>{const meta=ch.getDatasetMeta(di); const pt=meta&&meta.data[pi]; if(!pt||meta.hidden) return;
     const w=ctx.measureText(txt).width+8, x=Math.min(Math.max(pt.x-w/2,ch.chartArea.left),ch.chartArea.right-w), y=arriba===false?pt.y+8:pt.y-24;
+    if(o.simple){ctx.font='10px "IBM Plex Mono",monospace'; ctx.fillStyle=col; ctx.textAlign="center"; ctx.fillText(txt,pt.x,arriba===false?pt.y+15:pt.y-8); return;}
     ctx.fillStyle="rgba(0,0,0,.75)"; ctx.fillRect(x,y,w,16); ctx.strokeStyle=col; ctx.strokeRect(x,y,w,16); ctx.fillStyle=col; ctx.textAlign="left"; ctx.fillText(txt,x+4,y+12);}); ctx.restore();}};
 
 // Probabilidad de reelección (riesgo país) + ICG
@@ -2519,6 +2585,61 @@ function mora(){
 }
 document.querySelectorAll("[data-mo]").forEach(b=>b.onclick=()=>{moAnios=+b.dataset.mo;document.querySelectorAll("[data-mo]").forEach(x=>x.setAttribute("aria-pressed",x===b));mora();});
 setTimeout(mora,0);
+
+// Brent y nafta
+let c30, enVista="usd";
+function energia(){
+  const E=(D.historicos||{}).energia, panel=document.getElementById("pene");
+  if(!E||!E.brent.length||!Object.keys(E.nafta.super||{}).length){panel.style.display="none";return;}
+  const m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11}, BL="#3a8ee6", AM="#ffb000", VE="#00d26a";
+  const bmes={}; E.brent.forEach(([f,v])=>{(bmes[f.slice(0,7)]??=[]).push(v);}); const bm=k=>bmes[k]?bmes[k].reduce((a,b)=>a+b,0)/bmes[k].length:null;
+  const S=E.nafta.super, P=E.nafta.premium, MEP=E.mep;
+  const mesesN=Object.keys(S).sort(), uN=mesesN[mesesN.length-1], ia=`${+uN.slice(0,4)-1}${uN.slice(4)}`;
+  const [fB,vB]=E.brent[E.brent.length-1];
+  const usd=(o,k)=>o[k]&&MEP[k]?o[k]/MEP[k]:null, pc=(a,b)=>a!=null&&b?(a/b-1)*100:null, sg=v=>v==null?"s/d":`${v>0?"+":""}${fmt(v,0)} %`;
+  const bAnio=E.brent.find(x=>x[0]>=`${+fB.slice(0,4)-1}${fB.slice(4)}`);
+  document.getElementById("encards").innerHTML=
+    `<div style="--c:${AM}"><div class="nm">SÚPER YPF CABA · ${mesCorto(uN)}</div><div class="pc">$ ${fmt(S[uN],0)}</div><div class="rg">USD ${fmt(usd(S,uN)||0,2)} al MEP · ${sg(pc(S[uN],S[ia]))} en pesos en 12 meses</div></div>`+
+    `<div style="--c:${VE}"><div class="nm">PREMIUM YPF CABA · ${mesCorto(uN)}</div><div class="pc">$ ${fmt(P[uN],0)}</div><div class="rg">USD ${fmt(usd(P,uN)||0,2)} al MEP · ${sg(pc(P[uN],P[ia]))} en pesos en 12 meses</div></div>`+
+    `<div style="--c:${BL}"><div class="nm">BRENT · ${dmy(fB)}</div><div class="pc">USD ${fmt(vB,1)}</div><div class="rg">${bAnio?sg(pc(vB,bAnio[1]))+" en 12 meses":""}</div></div>`+
+    `<div style="--c:#777"><div class="nm">SÚPER EN USD VS ${mesCorto(ia).toUpperCase()}</div><div class="pc">${sg(pc(usd(S,uN),usd(S,ia)))}</div><div class="rg">Brent promedio: ${sg(pc(bm(uN),bm(ia)))}</div></div>`;
+  c30?.destroy();
+  const cv=document.getElementById("c30");
+  if(enVista==="usd"){
+    const L=mesesN.filter(k=>MEP[k]&&bm(k)!=null).slice(-24);
+    const su=L.map(k=>usd(S,k)), pr=L.map(k=>usd(P,k)), br=L.map(k=>bm(k));
+    const lab=[]; L.forEach((_,i)=>{lab.push([0,i,fmt(pr[i],2),VE]); lab.push([1,i,fmt(su[i],2),AM,false]); lab.push([2,i,fmt(br[i],0),BL,false]);});
+    c30=new Chart(cv,{type:"line",data:{labels:L.map(mesCorto),datasets:[
+        {label:"Premium (USD por litro)",data:pr,borderColor:VE,backgroundColor:VE,borderWidth:2.4,pointRadius:3.5,tension:0,yAxisID:"y"},
+        {label:"Súper (USD por litro)",data:su,borderColor:AM,backgroundColor:AM,borderWidth:2.4,pointRadius:3.5,tension:0,yAxisID:"y"},
+        {label:"Brent promedio del mes (USD/bbl, der.)",data:br,borderColor:BL,backgroundColor:BL,borderWidth:2,borderDash:[6,4],pointRadius:3,pointStyle:"rect",tension:0,yAxisID:"y2"}]},
+      options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
+        plugins:{legend:{labels:{color:m,boxWidth:12,font}},etiquetas:{lista:lab,simple:true},tooltip:{callbacks:{label:it=>it.datasetIndex===2?`Brent: USD ${fmt(it.raw,1)}`:`${it.dataset.label.split(" (")[0]}: USD ${fmt(it.raw,2)} por litro`}}},
+        scales:{x:{grid:{display:false},ticks:{color:m,font,maxRotation:45}},
+          y:{grid:{color:g},ticks:{color:m,font,callback:v=>fmt(v,2)},title:{display:true,text:"USD por litro (MEP)",color:m,font}},
+          y2:{position:"right",grid:{display:false},suggestedMin:Math.min(...br)*0.6,ticks:{color:BL,font},title:{display:true,text:"Brent USD/bbl",color:BL,font}}}},plugins:[etiquetas]});
+    document.getElementById("enet").textContent="Nafta en dólares vs Brent · mes a mes, últimos 2 años";
+  } else if(enVista==="brent"){
+    const B=E.brent, L=B.map(x=>x[0]), V=B.map(x=>x[1]), iU=V.length-1, iMx=V.indexOf(Math.max(...V)), iMn=V.indexOf(Math.min(...V));
+    c30=new Chart(cv,{type:"line",data:{labels:L.map(f=>dmy(f).slice(0,5)+"/"+f.slice(2,4)),datasets:[{label:"Brent (USD/bbl)",data:V,borderColor:BL,backgroundColor:BL+"1f",fill:true,borderWidth:1.6,pointRadius:0,tension:0}]},
+      options:{responsive:true,maintainAspectRatio:false,animation:false,interaction:{mode:"index",intersect:false},
+        plugins:{legend:{display:false},etiquetas:{lista:[[0,iMx,"Máx. "+fmt(V[iMx],1),"#ff3b3b"],[0,iMn,"Mín. "+fmt(V[iMn],1),"#00d26a",false],[0,iU,"Hoy "+fmt(V[iU],1),"#ffffff"]]},tooltip:{callbacks:{label:it=>`USD ${fmt(it.raw,2)}`}}},
+        scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:12,maxRotation:0}},y:{grid:{color:g},ticks:{color:m,font}}}},plugins:[etiquetas]});
+    document.getElementById("enet").textContent="Petróleo Brent · diario, últimos 5 años (USD por barril)";
+  } else {
+    const desde=`${+uN.slice(0,4)-5}${uN.slice(4)}`, L=mesesN.filter(k=>k>=desde);
+    c30=new Chart(cv,{type:"line",data:{labels:L.map(mesCorto),datasets:[
+        {label:"Premium (Infinia)",data:L.map(k=>P[k]??null),borderColor:VE,backgroundColor:VE,borderWidth:2.2,pointRadius:2,tension:0},
+        {label:"Súper",data:L.map(k=>S[k]??null),borderColor:AM,backgroundColor:AM,borderWidth:2.2,pointRadius:2,tension:0}]},
+      options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
+        plugins:{legend:{labels:{color:m,boxWidth:12,font}},etiquetas:{lista:[[0,L.length-1,"$ "+fmt(P[uN],0),VE],[1,L.length-1,"$ "+fmt(S[uN],0),AM,false]]},tooltip:{callbacks:{label:it=>`${it.dataset.label}: $ ${fmt(it.raw,0)}`}}},
+        scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:14,maxRotation:0}},y:{grid:{color:g},ticks:{color:m,font,callback:v=>"$ "+fmt(v)}}}},plugins:[etiquetas]});
+    document.getElementById("enet").textContent="Nafta YPF en CABA · pesos por litro, mensual, últimos 5 años";
+  }
+  document.getElementById("nene").textContent=`Nafta: precio de YPF en CABA, promedio mensual (el mes en curso, precio vigente). En dólares: precio en pesos dividido por el dólar MEP promedio del mes. Brent: futuro ICE; en la vista mensual, promedio del mes (el mes en curso, parcial). Fuentes: Surtidores.com.ar, data912 (MEP con el AL30), Yahoo Finance.`;
+}
+document.querySelectorAll("[data-en]").forEach(b=>b.onclick=()=>{enVista=b.dataset.en;document.querySelectorAll("[data-en]").forEach(x=>x.setAttribute("aria-pressed",x===b));energia();});
+setTimeout(energia,0);
 
 // EMAE con cambios de gobierno
 let c24;
@@ -2770,7 +2891,7 @@ function servicios(){
   document.getElementById("nserv").textContent=`Último: USD ${fmt(u[i],0)} M en los 12 meses a ${mesCorto(u[0])}${a?`, ${fmt((u[i]/a[i]-1)*100,0)} % más que un año antes`:""}. Son los dólares que ingresan por el mercado de cambios por cada servicio (balance cambiario del BCRA), por eso pueden diferir de las estadísticas del INDEC. Fuente: BCRA vía datos.gob.ar.`;
 }
 document.querySelectorAll("[data-sv]").forEach(b=>b.onclick=()=>{svVista=b.dataset.sv;document.querySelectorAll("[data-sv]").forEach(x=>x.setAttribute("aria-pressed",x===b));servicios();});
-setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();salarioMandatos();},0);
+setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();salarioMandatos();energia();},0);
 
 // Semáforo de actividad
 function semaforoTabla(){
@@ -3015,7 +3136,7 @@ function render(){
 
 }
 document.querySelectorAll("[data-mode]").forEach(b=>b.onclick=()=>{mode=b.dataset.mode;document.querySelectorAll("[data-mode]").forEach(x=>x.setAttribute("aria-pressed",x===b));render();});
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();salarioMandatos();inflacion();});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();salarioMandatos();energia();inflacion();});
 render();
 function avisos(){const A=D.avisos||[], el=document.getElementById("avisos"); el.innerHTML=A.length?`<section class="panel" style="border-color:var(--bad)"><div class="k" style="color:var(--bad)">Avisos de la última actualización</div><ul class="n" style="margin:6px 0 0;padding-left:18px">${A.map(a=>`<li>${a.replace(/</g,"&lt;")}</li>`).join("")}</ul></section>`:"";}
 avisos();
@@ -3048,7 +3169,7 @@ document.addEventListener("keydown",e=>{ if(e.target.tagName==="SELECT"||e.targe
 })();
 (function reloj(){const el=document.getElementById("clk"); const f=()=>{el.textContent=new Date().toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})+" ART";}; f(); setInterval(f,30000);})();
 // Redibuja cuando termina de cargar la tipografía, para que las etiquetas midan bien
-if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();salarioMandatos();inflacion();});
+if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();salarioMandatos();energia();inflacion();});
 // Recarga la página cada 10 minutos para tomar la última versión generada
 // Recarga salteando la caché del navegador (agrega ?t=… al link)
 const recargar=()=>location.replace(location.pathname+"?t="+Date.now()+location.hash);
