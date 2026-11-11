@@ -608,10 +608,24 @@ def dolares_de_bonos(hoy):
     for f in h["AL30"]:
         if f in h["AL30D"] and f in h["AL30C"]:
             serie[f] = (h["AL30"][f] / h["AL30D"][f], h["AL30"][f] / h["AL30C"][f])
+    # El histórico de data912 a veces llega con días de atraso: se completa con lo que el tablero guardó en cada rueda
+    arch = os.path.join(BASE, "historial_dolares.json")
+    try:
+        with open(arch, encoding="utf-8") as f:
+            propio = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        propio = {}
+    for f, (mep_, ccl_) in propio.items():
+        serie.setdefault(f, (mep_, ccl_))
     try:  # precio del momento (la rueda en curso todavía no figura en el histórico)
         v = {x["symbol"]: x for x in get_json(BONOS_URL)}
         if all(v.get(t, {}).get("c") for t in ("AL30", "AL30D", "AL30C")) and hoy.weekday() < 5:
-            serie[hoy.isoformat()] = (v["AL30"]["c"] / v["AL30D"]["c"], v["AL30"]["c"] / v["AL30C"]["c"])
+            par = (v["AL30"]["c"] / v["AL30D"]["c"], v["AL30"]["c"] / v["AL30C"]["c"])
+            serie[hoy.isoformat()] = par
+            propio[hoy.isoformat()] = [round(par[0], 4), round(par[1], 4)]
+            propio = {k: x for k, x in sorted(propio.items()) if k > (hoy - dt.timedelta(days=120)).isoformat()}
+            with open(arch, "w", encoding="utf-8") as f:
+                json.dump(propio, f, indent=1)
     except Exception:
         pass
     return dict(sorted(serie.items()))
