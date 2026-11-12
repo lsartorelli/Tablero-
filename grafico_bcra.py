@@ -76,16 +76,84 @@ CONFIG_DEFECTO = {
         ]
     },
     "preocupaciones": {
-        "_ayuda": "Ranking de preocupaciones de la Encuesta de Satisfacción Política y Opinión Pública (UdeSA). "
-                  "No tiene fuente abierta: actualizá a mano las fechas y el ranking (1 = la mayor preocupación).",
-        "fuente": "FMyA en base a UdeSA",
-        "fechas": ["nov-23", "ago-26"],
-        "ranking": [["Desempleo", 8, 1], ["Bajos salarios", 7, 2], ["Corrupción", 2, 3], ["Pobreza", 5, 4], ["Políticos", 4, 5], ["Inseguridad", 3, 6], ["Endeudamiento externo", 6, 7], ["Inflación", 1, 8], ["Justicia", 9, 9], ["Educación", 9, 10], ["Narcotráfico", 11, 11], ["Salud", 12, 11], ["Obra pública", 16, 13], ["Acceso a vivienda", 12, 14], ["Policía", 14, 15], ["Villas", 15, 16], ["Transporte", 16, 16], ["Inmigración", 19, 16], ["Epidemias", 16, 19], ["Cambio climático", 19, 19]]
+            "_ayuda": "Porcentaje de menciones de cada problema en la encuesta ESPOP de la UdeSA (pregunta de respuesta múltiple). No tiene datos abiertos: cuando salga una medición nueva, agregá el mes en 'meses' y el valor en cada tema (None si no se publicó).",
+            "fuente": "ESPOP, Universidad de San Andrés (según informes y notas de prensa)",
+            "meses": [
+                    "2025-09",
+                    "2026-05",
+                    "2026-07",
+                    "2026-08",
+                    "2026-09",
+                    "2026-10"
+            ],
+            "temas": {
+                    "Falta de trabajo": [
+                            31,
+                            37,
+                            38,
+                            39,
+                            39,
+                            39
+                    ],
+                    "Bajos salarios": [
+                            34,
+                            37,
+                            35,
+                            36,
+                            36,
+                            35
+                    ],
+                    "Corrupción": [
+                            35,
+                            36,
+                            38,
+                            34,
+                            29,
+                            30
+                    ],
+                    "Pobreza": [
+                            None,
+                            30,
+                            27,
+                            30,
+                            29,
+                            31
+                    ],
+                    "Inseguridad": [
+                            28,
+                            26,
+                            None,
+                            None,
+                            None,
+                            24
+                    ],
+                    "Los políticos": [
+                            None,
+                            26,
+                            None,
+                            None,
+                            None,
+                            22
+                    ],
+                    "Inflación": [
+                            None,
+                            22,
+                            17,
+                            None,
+                            None,
+                            19
+                    ]
+            }
     },
     "mora_estimada": {
         "_ayuda": "Adelantos privados de la mora (por ejemplo de la consultora 1816 con la Central de Deudores) para los meses "
                   "que el BCRA todavía no publicó. Se muestran como estimados y se ignoran solos cuando sale el dato oficial.",
         "2026-09": {"total": 7.50, "familias": 12.2, "empresas": 3.82, "fuente": "1816 en base a la Central de Deudores"}
+    },
+    "ipc_manual": {
+        "_ayuda": "Inflación del INDEC para usar el mismo día que se publica, antes de que la cargue la API del BCRA "
+                  "(suele tardar uno o dos días). Cuando la API la tiene, este dato se ignora solo.",
+        "2026-10": {"mensual": 2.2, "interanual": 33.1}
     },
     "reeleccion": {
         "_ayuda": "Riesgo país esperado si Milei es reelecto (riesgo_gana) y si pierde (riesgo_pierde). "
@@ -1225,6 +1293,14 @@ def main():
         ia = serie(VAR_INFL_IA, (hoy - dt.timedelta(days=800)).isoformat())
         inflacion = {"mensual": [{"mes": x["fecha"][:7], "valor": x["valor"]} for x in im],
                      "interanual": [{"mes": x["fecha"][:7], "valor": x["valor"]} for x in ia]}
+        # Dato del INDEC cargado en config.json para los días en que la API del BCRA todavía no lo publicó
+        for mes, v in leer_config().get("ipc_manual", {}).items():
+            if mes.startswith("_"):
+                continue
+            for clave, campo in (("mensual", "mensual"), ("interanual", "interanual")):
+                if v.get(campo) is not None and not any(x["mes"] == mes for x in inflacion[clave]):
+                    inflacion[clave].append({"mes": mes, "valor": float(v[campo]), "prov": True})
+                    inflacion[clave].sort(key=lambda x: x["mes"])
         # Acumulado del año: con el índice del INDEC (más preciso que sumar los mensuales redondeados)
         ult_mes = inflacion["mensual"][-1]["mes"]
         anio = ult_mes[:4]
@@ -2008,7 +2084,8 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
   </section>
 
   <section data-sec="bonos" class="panel" id="ppre">
-    <div class="phead"><h2 id="pret">Preocupaciones de los argentinos (ranking)</h2></div>
+    <div class="phead"><h2 id="pret">Preocupaciones de los argentinos (% de menciones)</h2></div>
+    <div class="chartbox" style="height:360px"><canvas id="c31" aria-label="Evolución del porcentaje de menciones de cada problema en la encuesta de la UdeSA"></canvas></div>
     <div class="tablewrap"><table class="mkt" id="tpre"></table></div>
     <p class="n" id="npre" style="margin:8px 0 0"></p>
   </section>
@@ -2815,15 +2892,33 @@ function oro(){
 setTimeout(oro,0);
 
 // Preocupaciones (ranking UdeSA)
+let c31;
 function preocupaciones(){
   const P=(D.historicos||{}).preocupaciones, panel=document.getElementById("ppre");
-  if(!P||!P.ranking||!P.ranking.length){panel.style.display="none";return;}
-  const [f1,f2]=P.fechas, R=[...P.ranking].sort((a,b)=>a[2]-b[2]||a[1]-b[1]);
-  const flecha=(a,b)=>{const d=a-b; return d>0?`<td class="pc up">▲ ${d}</td>`:d<0?`<td class="pc down">▼ ${-d}</td>`:'<td class="pc">=</td>';};
-  document.getElementById("tpre").innerHTML=`<thead><tr><th>Preocupación</th><th>${f1}</th><th>${f2}</th><th>Cambio</th></tr></thead><tbody>`+
-    R.map(([n,a,b])=>`<tr${b<=3?' style="background:#1a1300"':""}><td class="t">${n}</td><td>${a}</td><td class="val">${b}</td>${flecha(a,b)}</tr>`).join("")+"</tbody>";
-  document.getElementById("pret").textContent=`Preocupaciones de los argentinos: ranking ${f1} contra ${f2}`;
-  document.getElementById("npre").textContent=`Puesto en el ranking (1 = la mayor preocupación). ▲ sube como preocupación, ▼ baja. Fuente: ${P.fuente||"UdeSA"}. Esta encuesta no tiene datos abiertos: para actualizarla, editá el bloque "preocupaciones" de config.json.`;
+  if(!P||!P.temas||!P.meses){panel.style.display="none";return;}
+  const COL=["#ff3b3b","#ffb000","#b388ff","#00d26a","#3a8ee6","#5fd3e6","#ff66c4","#aaaaaa"];
+  // eje mensual continuo: los meses sin medición quedan vacíos y la línea los une
+  const sig=k=>{let[y,m]=k.split("-").map(Number);m++;if(m>12){m=1;y++;}return y+"-"+String(m).padStart(2,"0");};
+  const L=[]; for(let k=P.meses[0]; k<=P.meses[P.meses.length-1]; k=sig(k)) L.push(k);
+  const temas=Object.keys(P.temas), m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  const serie=t=>L.map(k=>{const i=P.meses.indexOf(k); return i>=0?P.temas[t][i]:null;});
+  const lab=[]; temas.forEach((t,di)=>{const v=serie(t); for(let i=v.length-1;i>=0;i--) if(v[i]!=null){lab.push([di,i,v[i]+"%",COL[di%COL.length]]); break;}});
+  c31?.destroy();
+  c31=new Chart(document.getElementById("c31"),{type:"line",data:{labels:L.map(mesCorto),datasets:temas.map((t,i)=>({label:t,data:serie(t),spanGaps:true,
+      borderColor:COL[i%COL.length],backgroundColor:COL[i%COL.length],borderWidth:i<4?2.6:1.8,pointRadius:L.map(k=>P.meses.includes(k)?4:0),tension:.2}))},
+    options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
+      plugins:{legend:{labels:{color:m,boxWidth:12,font}},etiquetas:{lista:lab,simple:true},tooltip:{filter:it=>it.raw!=null,callbacks:{label:it=>`${it.dataset.label}: ${it.raw} %`}}},
+      scales:{x:{grid:{display:false},ticks:{color:m,font,maxRotation:0,autoSkip:false,callback:function(v){const k=L[v];return P.meses.includes(k)?mesCorto(k):"";}}},
+        y:{beginAtZero:true,suggestedMax:45,grid:{color:g},ticks:{color:m,font,callback:v=>v+" %"}}}},plugins:[etiquetas]});
+  // tabla de tendencia: último dato, contra la medición anterior disponible y contra la primera
+  const filas=temas.map(t=>{const v=P.temas[t].map((x,i)=>[P.meses[i],x]).filter(x=>x[1]!=null); const u=v[v.length-1], a=v[v.length-2], pr=v[0];
+    return {t,u,a,pr};}).sort((x,y)=>y.u[1]-x.u[1]);
+  const pp=(x,y)=>{if(!y) return '<td class="pc">–</td>'; const d=x[1]-y[1]; return `<td class="pc ${d>0?"down":d<0?"up":""}">${d>0?"▲ +":d<0?"▼ ":"= "}${d!==0?d:""}${d!==0?" pp":""} <small>vs ${mesCorto(y[0])}</small></td>`;};
+  const tend=f=>{if(!f.a) return "–"; const d=f.u[1]-f.a[1]; return d>=2?'<span style="color:var(--bad)">SUBE</span>':d<=-2?'<span style="color:var(--good)">BAJA</span>':'<span style="color:#ffb000">ESTABLE</span>';};
+  document.getElementById("tpre").innerHTML=`<thead><tr><th>Problema</th><th>Último</th><th>Contra la medición anterior</th><th>Contra la primera medición</th><th>Tendencia</th></tr></thead><tbody>`+
+    filas.map((f,i)=>`<tr${i<3?' style="background:#1a1300"':""}><td class="t">${i+1}. ${f.t}</td><td class="val">${f.u[1]} % <small>${mesCorto(f.u[0])}</small></td>${pp(f.u,f.a)}${f.pr[0]!==f.u[0]?pp(f.u,f.pr):'<td class="pc">–</td>'}<td>${tend(f)}</td></tr>`).join("")+"</tbody>";
+  document.getElementById("pret").textContent=`Preocupaciones de los argentinos: % que menciona cada problema (${mesCorto(P.meses[0])} a ${mesCorto(P.meses[P.meses.length-1])})`;
+  document.getElementById("npre").textContent=`Porcentaje de encuestados que menciona cada tema entre los principales problemas del país (se pueden elegir varios, por eso no suman 100). Los puntos son meses con medición publicada; la línea une los datos disponibles. Tendencia: sube o baja si cambió 2 puntos o más contra la medición anterior. En rojo, los temas cuya preocupación crece. Fuente: ${P.fuente}. Se actualiza a mano en config.json, en el bloque "preocupaciones".`;
 }
 setTimeout(preocupaciones,0);
 
