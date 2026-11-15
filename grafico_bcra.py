@@ -155,6 +155,11 @@ CONFIG_DEFECTO = {
                   "(suele tardar uno o dos días). Cuando la API la tiene, este dato se ignora solo.",
         "2026-10": {"mensual": 2.2, "interanual": 33.1}
     },
+    "precios_relativos": {
+        "_ayuda": "Gráfico de ajuste de precios relativos: mes base (AAAA-MM) y gasto mensual de hoy del hogar de referencia.",
+        "base": "2023-11",
+        "gasto_hogar": 2000000
+    },
     "reeleccion": {
         "_ayuda": "Riesgo país esperado si Milei es reelecto (riesgo_gana) y si pierde (riesgo_pierde). "
                   "La probabilidad implícita se interpola entre ambos. Valores calibrados con la serie de FMyA.",
@@ -729,6 +734,53 @@ def nafta_ypf_caba():
                         v = v.replace(".", "", v.count(".") - 1)
                     out[clave][f"{y}-{i + 1:02d}"] = float(v)
     return {k: dict(sorted(v.items())) for k, v in out.items()}
+
+
+APERTURAS_URL = "https://www.indec.gob.ar/ftp/cuadros/economia/sh_ipc_aperturas.xls"
+RUBROS_RELATIVOS = [
+    ("Electricidad, gas y otros combustibles", "Electricidad y gas"), ("Transporte público", "Transporte público"),
+    ("Alquiler de la vivienda", "Alquiler de la vivienda"), ("Restaurantes y comidas fuera del hogar", "Restaurantes y comidas fuera del hogar"),
+    ("Combustibles y lubricantes para vehículos de uso del hogar", "Nafta y combustibles"), ("Gastos de prepagas", "Prepagas"),
+    ("Servicios de telefonía e internet", "Teléfono e internet"), ("Educación", "Educación"), ("Carnes y derivados", "Carnes"),
+    ("Leche, productos lácteos y huevos", "Leche, lácteos y huevos"), ("Azúcar, dulces, chocolate, golosinas, etc,", "Azúcar, dulces y golosinas"),
+    ("Bebidas alcohólicas", "Bebidas alcohólicas"), ("Adquisición de vehículos", "Compra de vehículos"), ("Pan y cereales", "Pan y cereales"),
+    ("Frutas", "Frutas"), ("Productos medicinales, artefactos y equipos para la salud", "Salud: medicamentos y productos"),
+    ("Calzado", "Calzado"), ("Prendas de vestir y materiales", "Ropa")]
+
+
+def precios_relativos(base, gasto):
+    """Cambio del gasto mensual por rubro de un hogar del GBA que consume lo mismo que en el mes base:
+    peso del rubro (canasta del IPC actualizada al mes base) x variación de su precio real x gasto mensual de hoy."""
+    import xlrd
+    libro = xlrd.open_workbook(file_contents=get_bytes(APERTURAS_URL))
+    s_, w_ = libro.sheet_by_name("Índices aperturas"), libro.sheet_by_name("Ponderaciones")
+    enc = next(r for r in range(15) if str(s_.cell_value(r, 0)).strip().startswith("Región GBA"))
+    fechas = {c: (dt.date(1899, 12, 30) + dt.timedelta(days=int(float(s_.cell_value(enc, c))))).strftime("%Y-%m")
+              for c in range(1, s_.ncols) if isinstance(s_.cell_value(enc, c), float)}
+    idx = {}
+    for r in range(enc + 1, s_.nrows):
+        n = str(s_.cell_value(r, 0)).strip()
+        if n.startswith("Región"):
+            break
+        if n:
+            idx[n] = {fechas[c]: s_.cell_value(r, c) for c in fechas if isinstance(s_.cell_value(r, c), float)}
+    norm = lambda x: x.replace(",", "").replace(".", "").strip().lower()
+    pesos = {}
+    for r in range(w_.nrows):  # tabla "según principales aperturas", columna GBA
+        n = str(w_.cell_value(r, 0)).strip()
+        if n and isinstance(w_.cell_value(r, 1), float) and norm(n) not in pesos and r > 20:
+            pesos[norm(n)] = w_.cell_value(r, 1)
+    gen = idx["Nivel general"]
+    hoy_m = max(gen)
+    out = []
+    for clave, nombre in RUBROS_RELATIVOS:
+        I = idx.get(clave)
+        if not I or norm(clave) not in pesos or base not in I or hoy_m not in I:
+            continue
+        cuota = pesos[norm(clave)] * I[base] / gen[base]
+        real = (I[hoy_m] / I[base]) / (gen[hoy_m] / gen[base]) - 1
+        out.append({"rubro": nombre, "pesos": round(cuota * real * gasto), "real": round(real * 100, 1)})
+    return {"base": base, "mes": hoy_m, "gasto": gasto, "rubros": sorted(out, key=lambda x: -x["pesos"])}
 
 
 def dia_habil_siguiente(d):
@@ -1615,6 +1667,13 @@ def main():
     except Exception as e:
         aviso(f"no se pudo leer la mora del crédito del Informe sobre Bancos ({e})")
     try:
+        pr = cfg.get("precios_relativos", CONFIG_DEFECTO["precios_relativos"])
+        historicos["relativos"] = precios_relativos(pr.get("base", "2023-11"), float(pr.get("gasto_hogar", 2000000)))
+    except ImportError:
+        aviso("para el gráfico de precios relativos instalá xlrd: pip install xlrd")
+    except Exception as e:
+        aviso(f"no se pudo calcular el ajuste de precios relativos ({e})")
+    try:
         historicos["personas"] = personas_humanas(hoy)
     except Exception as e:
         aviso(f"no se pudo armar la serie de compras de personas humanas ({e})")
@@ -2199,6 +2258,12 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <p class="n" id="nsal" style="margin:8px 0 0"></p>
   </section>
 
+  <section data-sec="ipc" class="panel" id="prel">
+    <div class="phead"><h2 id="relt">Ajuste de precios relativos</h2></div>
+    <div class="chartbox" id="relbox" style="height:560px"><canvas id="c32" aria-label="Cambio del gasto mensual por rubro por el cambio de precios relativos"></canvas></div>
+    <p class="n" id="nrel" style="margin:8px 0 0"></p>
+  </section>
+
   <section data-sec="ipc" class="panel" id="psm">
     <div class="phead"><h2>Salario registrado ajustado por inflación por mandato (100 = mes previo a la asunción)</h2></div>
     <div class="gobs" id="smcards"></div>
@@ -2615,6 +2680,27 @@ function salarios(){
   document.getElementById("nsal").textContent=`v.m.: variación mensual; v.ia.: interanual; v.a.: acumulada en el año; real i.a.: variación interanual descontada la inflación. El INDEC publica el índice con unos dos meses de rezago, y el dato del sector no registrado tiene cinco meses de rezago adicional (por eso no se incluye en el gráfico de salario real y su variación real está sobrestimada). Fuente: INDEC vía datos.gob.ar.`;
 }
 document.querySelectorAll("[data-sal]").forEach(b=>b.onclick=()=>{salVista=b.dataset.sal;document.querySelectorAll("[data-sal]").forEach(x=>x.setAttribute("aria-pressed",x===b));salarios();});
+
+// Ajuste de precios relativos
+let c32;
+const etiquetasRel={id:"etiquetasRel",afterDatasetsDraw(ch,_,o){const L=o&&o.lista; if(!L) return; const {ctx}=ch; ctx.save(); ctx.font='11px "IBM Plex Mono",monospace'; ctx.textBaseline="middle"; ctx.fillStyle="#ddd";
+  L.forEach((txt,i)=>{const pt=ch.getDatasetMeta(0).data[i]; if(!pt) return; const neg=ch.data.datasets[0].data[i]<0; ctx.textAlign=neg?"right":"left"; ctx.fillText(txt,pt.x+(neg?-6:6),pt.y);}); ctx.restore();}};
+function relativos(){
+  const R=(D.historicos||{}).relativos, panel=document.getElementById("prel");
+  if(!R||!R.rubros||!R.rubros.length){panel.style.display="none";return;}
+  const m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  const L=R.rubros.map(x=>x.rubro), V=R.rubros.map(x=>x.pesos), mx=Math.max(...V.map(Math.abs));
+  const txt=R.rubros.map(x=>`${x.pesos>0?"+":"−"}$ ${fmt(Math.abs(x.pesos),0)} (${x.real>0?"+":""}${fmt(x.real,0)} % real)`);
+  document.getElementById("relbox").style.height=Math.max(380,L.length*28+60)+"px";
+  c32?.destroy();
+  c32=new Chart(document.getElementById("c32"),{type:"bar",data:{labels:L,datasets:[{data:V,backgroundColor:V.map(v=>v>0?"#ff3b3b":"#00d26a"),barPercentage:.75}]},
+    options:{indexAxis:"y",responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},etiquetasRel:{lista:txt},
+      tooltip:{callbacks:{label:it=>txt[it.dataIndex]}}},
+      scales:{x:{min:-Math.ceil(mx*1.6/25000)*25000,max:Math.ceil(mx*1.6/25000)*25000,grid:{color:g},ticks:{color:m,font,callback:v=>(v>0?"+":"")+"$ "+fmt(v,0)}},y:{grid:{display:false},ticks:{color:"#ddd",font,autoSkip:false}}}},plugins:[etiquetasRel]});
+  document.getElementById("relt").textContent=`Ajuste de precios relativos: cambio en el gasto mensual desde ${mesCorto(R.base)} (precios de ${mesCorto(R.mes)})`;
+  document.getElementById("nrel").textContent=`Cuánto más (rojo) o menos (verde) paga por mes un hogar del GBA que gasta $ ${fmt(R.gasto,0)} y consume lo mismo que en ${mesCorto(R.base)}, porque el precio de cada rubro subió más o menos que la inflación general. Se calcula con el peso del rubro en la canasta del IPC del GBA, actualizado al mes base, y su variación de precio real. El mes base y el gasto del hogar se cambian en config.json. Fuente: INDEC, IPC por aperturas y ponderaciones.`;
+}
+setTimeout(relativos,0);
 
 // Salario real por mandato
 let c29;
@@ -3041,7 +3127,7 @@ function servicios(){
   document.getElementById("nserv").textContent=`Último: USD ${fmt(u[i],0)} M en los 12 meses a ${mesCorto(u[0])}${a?`, ${fmt((u[i]/a[i]-1)*100,0)} % más que un año antes`:""}. Son los dólares que ingresan por el mercado de cambios por cada servicio (balance cambiario del BCRA), por eso pueden diferir de las estadísticas del INDEC. Fuente: BCRA vía datos.gob.ar.`;
 }
 document.querySelectorAll("[data-sv]").forEach(b=>b.onclick=()=>{svVista=b.dataset.sv;document.querySelectorAll("[data-sv]").forEach(x=>x.setAttribute("aria-pressed",x===b));servicios();});
-setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();salarioMandatos();energia();},0);
+setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();salarioMandatos();energia();relativos();},0);
 
 // Semáforo de actividad
 function semaforoTabla(){
@@ -3294,7 +3380,7 @@ function render(){
 
 }
 document.querySelectorAll("[data-mode]").forEach(b=>b.onclick=()=>{mode=b.dataset.mode;document.querySelectorAll("[data-mode]").forEach(x=>x.setAttribute("aria-pressed",x===b));render();});
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();salarioMandatos();energia();inflacion();});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();salarioMandatos();energia();relativos();inflacion();});
 render();
 function avisos(){const A=D.avisos||[], el=document.getElementById("avisos"); el.innerHTML=A.length?`<section class="panel" style="border-color:var(--bad)"><div class="k" style="color:var(--bad)">Avisos de la última actualización</div><ul class="n" style="margin:6px 0 0;padding-left:18px">${A.map(a=>`<li>${a.replace(/</g,"&lt;")}</li>`).join("")}</ul></section>`:"";}
 avisos();
@@ -3327,7 +3413,7 @@ document.addEventListener("keydown",e=>{ if(e.target.tagName==="SELECT"||e.targe
 })();
 (function reloj(){const el=document.getElementById("clk"); const f=()=>{el.textContent=new Date().toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})+" ART";}; f(); setInterval(f,30000);})();
 // Redibuja cuando termina de cargar la tipografía, para que las etiquetas midan bien
-if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();salarioMandatos();energia();inflacion();});
+if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();salarioMandatos();energia();relativos();inflacion();});
 // Recarga la página cada 10 minutos para tomar la última versión generada
 // Recarga salteando la caché del navegador (agrega ?t=… al link)
 const recargar=()=>location.replace(location.pathname+"?t="+Date.now()+location.hash);
