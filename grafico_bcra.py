@@ -678,9 +678,15 @@ def dolares_de_bonos(hoy):
     serie = {}
     h = {t: {x["date"]: x["c"] for x in get_json(HIST_BONO_URL.format(t=t)) if isinstance(x, dict) and x.get("c")}
          for t in ("AL30", "AL30D", "AL30C")}
-    for f in h["AL30"]:
+    ant = None
+    for f in sorted(h["AL30"]):
         if f in h["AL30D"] and f in h["AL30C"]:
-            serie[f] = (h["AL30"][f] / h["AL30D"][f], h["AL30"][f] / h["AL30C"][f])
+            mep_, ccl_ = h["AL30"][f] / h["AL30D"][f], h["AL30"][f] / h["AL30C"][f]
+            # descarta datos erróneos de la fuente (precios mal cargados): CCL/MEP absurdo o salto de más del 25 % en un día
+            if not (0.85 < ccl_ / mep_ < 1.6) or (ant and not (0.75 < mep_ / ant < 1.33)):
+                continue
+            serie[f] = (mep_, ccl_)
+            ant = mep_
     # El histórico de data912 a veces llega con días de atraso: se completa con lo que el tablero guardó en cada rueda
     arch = os.path.join(BASE, "historial_dolares.json")
     try:
