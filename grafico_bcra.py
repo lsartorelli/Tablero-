@@ -307,8 +307,8 @@ BRASIL = {}  # tipo de cambio real bilateral con Brasil (ITCRB), lo completa itc
 ITCRM_BYTES = None
 
 
-def itcrb_diario():
-    """ITCRB Brasil diario (hoja de datos diarios del mismo Excel), solo días hábiles."""
+def itcrb_diario(col="C"):
+    """Serie diaria del Excel del ITCRM (col C: ITCRB Brasil; col B: ITCRM), solo días hábiles."""
     import io, re as _re, zipfile
     z = zipfile.ZipFile(io.BytesIO(ITCRM_BYTES or get_bytes(ITCRM_URL)))
     wb = z.read("xl/workbook.xml").decode("utf-8")
@@ -321,10 +321,31 @@ def itcrb_diario():
         try:
             f = dt.date(1899, 12, 30) + dt.timedelta(days=int(float(c["A"])))
             if f.year >= 1997 and f.weekday() < 5:
-                out.append((f.isoformat(), float(c["C"])))
+                out.append((f.isoformat(), float(c[col])))
         except (KeyError, ValueError):
             pass
     return out
+
+
+def ponderadores_itcrm():
+    """Último peso de cada socio comercial en el ITCRM (hoja de ponderadores del Excel), por moneda."""
+    import io, re as _re, zipfile
+    z = zipfile.ZipFile(io.BytesIO(ITCRM_BYTES or get_bytes(ITCRM_URL)))
+    wb = z.read("xl/workbook.xml").decode("utf-8")
+    rels = dict(_re.findall(r'Id="(rId\d+)"[^>]*Target="([^"]+)"', z.read("xl/_rels/workbook.xml.rels").decode("utf-8")))
+    rid = next(r for n, r in _re.findall(r'<sheet [^>]*name="([^"]+)"[^>]*r:id="([^"]+)"', wb) if "ondera" in n.lower())
+    xml = z.read("xl/" + rels[rid].lstrip("/").replace("xl/", "")).decode("utf-8")
+    ultima = None
+    for fila in _re.findall(r"<row [^>]*>(.*?)</row>", xml, _re.S):
+        c = dict(_re.findall(r'<c r="([A-Z]+)\d+"[^>]*?(?:/>|>(?:<f>.*?</f>)?<v>([^<]*)</v>)', fila))
+        try:
+            float(c["A"]); float(c["B"])
+            ultima = c
+        except (KeyError, ValueError):
+            pass
+    monedas = {"B": "BRL", "C": "CAD", "D": "CLP", "E": "USD", "F": "MXN", "G": "UYU", "H": "CNY",
+               "I": "INR", "J": "JPY", "K": "GBP", "L": "CHF", "M": "EUR", "N": "VND"}
+    return {m: float(ultima[col]) for col, m in monedas.items() if ultima and ultima.get(col)}
 
 
 def itcrm_mensual():
@@ -1400,6 +1421,41 @@ def main():
                 cc = None
             serie_tcr.append([m, round(of, 1), round(cc, 1) if cc else None])
         historicos["tcr"] = {"base": base, "serie": serie_tcr}
+        # ITCRM diario + estimación de los días que el BCRA todavía no publicó
+        try:
+            d_itcrm = itcrb_diario("B")
+            f_ult, v_ult = d_itcrm[-1]
+            a_d = dict(a3500)
+            pesos_m = ponderadores_itcrm()
+            fx = get_json(f"https://api.frankfurter.app/{(dt.date.fromisoformat(f_ult) - dt.timedelta(days=7)).isoformat()}..?from=USD&to=BRL,CAD,MXN,CNY,INR,JPY,GBP,CHF,EUR")["rates"]
+            disp = {m: w for m, w in pesos_m.items() if m == "USD" or all(m in v for v in fx.values())}
+            tot = sum(disp.values())
+            infl_ar = (inflacion.get("mensual") or [{"valor": 2.0}])[-1]["valor"] / 100
+            def fx_a(f):
+                k = max((x for x in fx if x <= f), default=None)
+                return fx[k] if k else None
+            def a_a(f):
+                k = max((x for x in a_d if x <= f), default=None)
+                return a_d[k] if k else None
+            base_fx, base_a = fx_a(f_ult), a_a(f_ult)
+            est = []
+            d = dt.date.fromisoformat(f_ult) + dt.timedelta(days=1)
+            while d <= hoy:
+                f = d.isoformat()
+                if d.weekday() < 5 and f in a_d:
+                    nom = a_d[f] / base_a
+                    fxf = fx_a(f)
+                    for m, w in disp.items():
+                        if m != "USD":
+                            nom *= (base_fx[m] / fxf[m]) ** (w / tot)
+                    dias = (d - dt.date.fromisoformat(f_ult)).days
+                    nom *= ((1 + 0.0025) / (1 + infl_ar)) ** (dias / 30)  # inflación argentina contra la de los socios (~3 % anual)
+                    est.append([f, round(v_ult * nom, 2)])
+                d += dt.timedelta(days=1)
+            historicos["itcrm"] = {"serie": [[f, round(v, 2)] for f, v in d_itcrm], "estimado": est,
+                                   "a3500": round(a_d[max(a_d)], 2), "a3500_fecha": max(a_d)}
+        except Exception as e:
+            aviso(f"no se pudo armar el ITCRM diario ({e})")
         # Dólar MEP real ajustado por el tipo de cambio real bilateral con Brasil
         try:
             mep_m = promedio_mensual((x["fecha"], float(x["venta"])) for x in get_json(DOLARES_URL.format(casa="bolsa")) if x.get("venta"))
@@ -1972,6 +2028,10 @@ tbody tr:nth-child(even) td{background:#0d0d0d}
 footer{color:#555;font-size:10.5px;margin-top:6px}
 select.nm{background:#000!important;color:var(--amb)!important;border:1px solid #444!important;border-radius:0!important;font:600 11px "IBM Plex Mono",monospace!important}
 [data-sec].oculto{display:none!important}
+.calc{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 10px 10px;padding:8px 10px;background:#0d0d0d;border:1px solid var(--line)}
+.calc label{color:var(--lbl);font-size:12px}
+.calc input{width:120px;background:#000;color:var(--amb);border:1px solid #444;font:600 14px "IBM Plex Mono",monospace;padding:4px 6px}
+.calc #itres{color:#ddd;font-size:12.5px}
 .sem td:nth-child(2){color:#999;text-align:center}
 .sem .dot{display:inline-block;width:14px;height:14px;border-radius:50%}
 .sem td.sv{text-align:center}
@@ -2179,6 +2239,23 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <div class="phead"><h2>Compras netas de dólares de personas humanas</h2></div>
     <div class="chartbox" style="height:320px"><canvas id="c13" aria-label="Compras netas mensuales de moneda extranjera de las personas humanas, en millones de dólares"></canvas></div>
     <p class="n" id="nph" style="margin:8px 0 0"></p>
+  </section>
+
+  <section data-sec="fx" class="panel" id="pitc">
+    <div class="phead"><h2>Tipo de cambio real multilateral (ITCRM, BCRA)</h2>
+      <div class="seg" role="group" aria-label="Período">
+        <button type="button" data-it="milei" aria-pressed="true">Gobierno Milei</button>
+        <button type="button" data-it="5" aria-pressed="false">5 años</button>
+        <button type="button" data-it="0" aria-pressed="false">Desde 1997</button>
+      </div></div>
+    <div class="gobs" id="itcards"></div>
+    <div class="calc">
+      <label for="itdol">Si el dólar oficial (A3500) fuera $</label>
+      <input id="itdol" type="number" inputmode="decimal" step="10" min="1">
+      <span id="itres"></span>
+    </div>
+    <div class="chartbox" style="height:380px"><canvas id="c33" aria-label="Índice de tipo de cambio real multilateral diario"></canvas></div>
+    <p class="n" id="nitc" style="margin:8px 0 0"></p>
   </section>
 
   <section data-sec="fx" class="panel" id="pbm">
@@ -2920,6 +2997,46 @@ function comercio(){
 }
 setTimeout(comercio,0);
 
+// ITCRM diario con promedios y calculadora
+let c33, itAnios="milei";
+function itcrm(){
+  const T=(D.historicos||{}).itcrm, panel=document.getElementById("pitc");
+  if(!T||!T.serie.length){panel.style.display="none";return;}
+  const ALL=[...T.serie,...T.estimado], m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  const prom=a=>a.reduce((s,x)=>s+x[1],0)/a.length;
+  const pH=prom(T.serie), gob=T.serie.filter(x=>x[0]>="2023-12-11"), pG=prom(gob);
+  const u=ALL[ALL.length-1], esEst=T.estimado.length>0, ultO=T.serie[T.serie.length-1];
+  const pct=T.serie.filter(x=>x[1]<=u[1]).length/T.serie.length*100;
+  const desde=itAnios==="milei"?"2023-12-01":+itAnios?(()=>{const d=new Date(u[0]);d.setFullYear(d.getFullYear()-+itAnios);return d.toISOString().slice(0,10);})():"1997-01-01";
+  const iAsun=S0=>S0.findIndex(x=>x[0]>="2023-12-11");
+  const S=ALL.filter(x=>x[0]>=desde), L=S.map(x=>x[0]), nO=S.filter(x=>x[0]<=ultO[0]).length;
+  const vs=(a,b)=>`${a>=b?"+":""}${fmt((a/b-1)*100,0)} %`;
+  document.getElementById("itcards").innerHTML=
+    `<div style="--c:#3a8ee6"><div class="nm">ITCRM · ${dmy(u[0])}${esEst?" (EST.)":""}</div><div class="pc">${fmt(u[1],1)}</div><div class="rg">${esEst?`oficial ${fmt(ultO[1],1)} al ${dmy(ultO[0])}`:"dato oficial"}</div></div>`+
+    `<div style="--c:#ffb000"><div class="nm">VS PROMEDIO DESDE 1997</div><div class="pc">${vs(u[1],pH)}</div><div class="rg">promedio ${fmt(pH,1)} · dólar equivalente $ ${fmt(T.a3500*pH/u[1],0)}</div></div>`+
+    `<div style="--c:#b388ff"><div class="nm">VS PROMEDIO GOBIERNO MILEI</div><div class="pc">${vs(u[1],pG)}</div><div class="rg">promedio ${fmt(pG,1)} · dólar equivalente $ ${fmt(T.a3500*pG/u[1],0)}</div></div>`+
+    `<div style="--c:#777"><div class="nm">PERCENTIL DESDE 1997</div><div class="pc">${fmt(pct,0)}</div><div class="rg">más bajo = peso más apreciado</div></div>`;
+  // calculadora
+  const inp=document.getElementById("itdol"), res=document.getElementById("itres");
+  if(!inp.value) inp.value=Math.round(T.a3500);
+  const calc=()=>{const x=parseFloat(inp.value); if(!(x>0)){res.textContent="";return;}
+    const it=u[1]*x/T.a3500, p=T.serie.filter(y=>y[1]<=it).length/T.serie.length*100;
+    res.innerHTML=`→ ITCRM <b style="color:var(--amb)">${fmt(it,1)}</b> · ${vs(it,pH)} contra el promedio histórico · ${vs(it,pG)} contra el del gobierno · percentil ${fmt(p,0)} (hoy A3500 $ ${fmt(T.a3500,2)})`;};
+  inp.oninput=calc; calc();
+  c33?.destroy();
+  c33=new Chart(document.getElementById("c33"),{type:"line",data:{labels:L.map(f=>dmy(f).slice(0,5)+"/"+f.slice(2,4)),datasets:[
+      {label:"ITCRM (BCRA)",data:S.map((x,i)=>i<nO?x[1]:null),borderColor:"#3a8ee6",borderWidth:2,pointRadius:0,tension:0},
+      {label:"Estimado (días sin dato oficial)",data:S.map((x,i)=>i>=nO-1?x[1]:null),borderColor:"#3a8ee6",borderDash:[3,3],borderWidth:2,pointRadius:0,tension:0},
+      {label:`Promedio desde 1997 (${fmt(pH,1)})`,data:L.map(()=>pH),borderColor:"#ffb000",borderDash:[6,4],borderWidth:1.4,pointRadius:0},
+      {label:`Promedio gobierno Milei (${fmt(pG,1)})`,data:L.map(()=>pG),borderColor:"#b388ff",borderDash:[6,4],borderWidth:1.4,pointRadius:0}]},
+    options:{responsive:true,maintainAspectRatio:false,animation:false,interaction:{mode:"index",intersect:false},
+      plugins:{legend:{labels:{color:m,boxWidth:12,font}},lineasVert:{marcas:[[iAsun(S),"ASUME MILEI"]]},etiquetas:{lista:[[esEst?1:0,S.length-1,fmt(u[1],1),"#ffffff"]]},tooltip:{filter:it=>it.datasetIndex<2&&it.raw!=null,callbacks:{title:it=>dmy(L[it[0].dataIndex]),label:it=>`ITCRM${it.datasetIndex===1?" (est.)":""}: ${fmt(it.raw,1)}`}}},
+      scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:12,maxRotation:0}},y:{grid:{color:g},ticks:{color:m,font}}}},plugins:[etiquetas,lineasVert]});
+  document.getElementById("nitc").textContent=`Índice de tipo de cambio real multilateral del BCRA (base 17-12-2015 = 100): más alto, peso más depreciado; más bajo, peso más apreciado. El BCRA lo publica con unas dos semanas de rezago; los días posteriores (línea punteada) se estiman con el A3500, las monedas de los principales socios (Banco Central Europeo) ponderadas como en el índice y la diferencia entre la inflación argentina del último mes y la de los socios. La calculadora mantiene fijos los precios y las demás monedas de hoy. Fuentes: BCRA, Banco Central Europeo.`;
+}
+document.querySelectorAll("[data-it]").forEach(b=>b.onclick=()=>{itAnios=b.dataset.it;document.querySelectorAll("[data-it]").forEach(x=>x.setAttribute("aria-pressed",x===b));itcrm();});
+setTimeout(itcrm,0);
+
 // Big Mac
 let c27, bmVista="sel";
 const BM_SEL=["CHE","URY","NOR","GBR","SWE","EUZ","DNK","TUR","MEX","USA","ARG","CHL","BRA","CHN","KOR","JPN","IND"];
@@ -3133,7 +3250,7 @@ function servicios(){
   document.getElementById("nserv").textContent=`Último: USD ${fmt(u[i],0)} M en los 12 meses a ${mesCorto(u[0])}${a?`, ${fmt((u[i]/a[i]-1)*100,0)} % más que un año antes`:""}. Son los dólares que ingresan por el mercado de cambios por cada servicio (balance cambiario del BCRA), por eso pueden diferir de las estadísticas del INDEC. Fuente: BCRA vía datos.gob.ar.`;
 }
 document.querySelectorAll("[data-sv]").forEach(b=>b.onclick=()=>{svVista=b.dataset.sv;document.querySelectorAll("[data-sv]").forEach(x=>x.setAttribute("aria-pressed",x===b));servicios();});
-setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();salarioMandatos();energia();relativos();},0);
+setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();salarioMandatos();energia();relativos();},0);
 
 // Semáforo de actividad
 function semaforoTabla(){
@@ -3386,7 +3503,7 @@ function render(){
 
 }
 document.querySelectorAll("[data-mode]").forEach(b=>b.onclick=()=>{mode=b.dataset.mode;document.querySelectorAll("[data-mode]").forEach(x=>x.setAttribute("aria-pressed",x===b));render();});
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();salarioMandatos();energia();relativos();inflacion();});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();salarioMandatos();energia();relativos();inflacion();});
 render();
 function avisos(){const A=D.avisos||[], el=document.getElementById("avisos"); el.innerHTML=A.length?`<section class="panel" style="border-color:var(--bad)"><div class="k" style="color:var(--bad)">Avisos de la última actualización</div><ul class="n" style="margin:6px 0 0;padding-left:18px">${A.map(a=>`<li>${a.replace(/</g,"&lt;")}</li>`).join("")}</ul></section>`:"";}
 avisos();
@@ -3419,7 +3536,7 @@ document.addEventListener("keydown",e=>{ if(e.target.tagName==="SELECT"||e.targe
 })();
 (function reloj(){const el=document.getElementById("clk"); const f=()=>{el.textContent=new Date().toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})+" ART";}; f(); setInterval(f,30000);})();
 // Redibuja cuando termina de cargar la tipografía, para que las etiquetas midan bien
-if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();salarioMandatos();energia();relativos();inflacion();});
+if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();salarioMandatos();energia();relativos();inflacion();});
 // Recarga la página cada 10 minutos para tomar la última versión generada
 // Recarga salteando la caché del navegador (agrega ?t=… al link)
 const recargar=()=>location.replace(location.pathname+"?t="+Date.now()+location.hash);
