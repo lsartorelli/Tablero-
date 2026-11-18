@@ -908,7 +908,12 @@ def get_json(url, intentos=3):
         except urllib.error.HTTPError as e:
             if e.code < 500 or i == intentos - 1:
                 raise
-        except (urllib.error.URLError, TimeoutError, ConnectionError):
+        except (TimeoutError, __import__("socket").timeout):
+            raise  # si la fuente no responde, no se insiste: así una fuente caída no demora todo el tablero
+        except urllib.error.URLError as e:
+            if "timed out" in str(e) or i == intentos - 1:
+                raise
+        except (ConnectionError, __import__("http.client").client.IncompleteRead):
             if i == intentos - 1:
                 raise
         time.sleep(3)
@@ -917,7 +922,7 @@ def get_json(url, intentos=3):
 def _get_json(url):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=40) as r:
+        with urllib.request.urlopen(req, timeout=30) as r:
             return json.load(r)
     except urllib.error.URLError as e:
         if isinstance(getattr(e, "reason", None), ssl.SSLError):
@@ -1718,6 +1723,17 @@ def main():
                     time.sleep(5)
         res_br = [[conv(x["data"]), round(float(x["valor"]) / 1000, 2)] for x in sgs_get(13621)]
         fx_br = [[conv(x["data"]), float(x["valor"])] for x in sgs_get(1)]
+        try:  # PTAX del día: el servicio OData del BCB la publica a las 13 h; la serie SGS se actualiza más tarde
+            d0, d1 = (hoy - dt.timedelta(days=12)).strftime("%m-%d-%Y"), hoy.strftime("%m-%d-%Y")
+            od = get_json("https://olinda.bcb.gov.br/olinda/servico/PTAX/versao/v1/odata/CotacaoDolarPeriodo("
+                          "dataInicial=@dataInicial,dataFinalCotacao=@dataFinalCotacao)"
+                          f"?@dataInicial='{d0}'&@dataFinalCotacao='{d1}'&$format=json")["value"]
+            fxd = dict((f, v) for f, v in fx_br)
+            for x in od:
+                fxd[x["dataHoraCotacao"][:10]] = float(x["cotacaoVenda"])
+            fx_br = sorted([f, v] for f, v in fxd.items())
+        except Exception as e:
+            aviso(f"no se pudo traer la PTAX del día del Banco Central de Brasil ({e})")
         historicos["brasil"] = {"res": res_br, "fx": fx_br}
     except Exception as e:
         aviso(f"no se pudieron traer los datos del Banco Central de Brasil ({e})")
