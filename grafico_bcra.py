@@ -160,6 +160,11 @@ CONFIG_DEFECTO = {
         "base": "2023-11",
         "gasto_hogar": 2000000
     },
+    "rendimientos": {
+        "_ayuda": "Gráfico de rendimientos del año en pesos. T15E7: precio de cierre del último día hábil del año anterior "
+                  "(por cada 100 de valor nominal), porque la fuente no tiene su histórico. Si queda en null, no se muestra.",
+        "T15E7_precio_base": None
+    },
     "reeleccion": {
         "_ayuda": "Riesgo país esperado si Milei es reelecto (riesgo_gana) y si pierde (riesgo_pierde). "
                   "La probabilidad implícita se interpola entre ambos. Valores calibrados con la serie de FMyA.",
@@ -810,6 +815,108 @@ def precios_relativos(base, gasto):
     return {"base": base, "mes": hoy_m, "gasto": gasto, "rubros": sorted(out, key=lambda x: -x["pesos"])}
 
 
+def rendimientos_anio(hoy, inflacion, cfg_r):
+    """Rendimiento en pesos desde el último cierre del año anterior de varios activos, con la inflación del período."""
+    ini = f"{hoy.year - 1}-12-31"
+    desde = f"{hoy.year - 1}-12-01"
+    base = lambda serie_: max((x for x in serie_ if x[0] <= ini), default=None)
+    out, avisos_r = [], []
+    mep = sorted(DOLARES_BONOS.items())
+    mep_en = lambda f: max(((k, v[0]) for k, v in mep if k <= f), default=(None, None))[1]
+    mep0, mep1 = mep_en(ini), mep[-1][1][0] if mep else None
+
+    def agregar(nombre, v0, v1, tipo):
+        if v0 and v1:
+            out.append({"activo": nombre, "rend": round((v1 / v0 - 1) * 100, 1), "tipo": tipo})
+
+    def yahoo(t):
+        r = get_json(f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(t)}?range=2y&interval=1d")["chart"]["result"][0]
+        return sorted((dt.datetime.fromtimestamp(a, dt.timezone.utc).date().isoformat(), c)
+                      for a, c in zip(r["timestamp"], r["indicators"]["quote"][0]["close"]) if c)
+    for nombre, t, en_usd in (("Merval", "^MERV", False), ("S&P 500 (SPY)", "SPY", True), ("Bitcoin", "BTC-USD", True)):
+        try:
+            y = yahoo(t)
+            b0 = base(y)
+            if not b0 or len(y) < 20:
+                raise ValueError("Yahoo no devolvió el histórico")
+            if en_usd:
+                agregar(nombre, b0[1] * mep0, y[-1][1] * mep1, "acciones" if t != "BTC-USD" else "cripto")
+            else:
+                agregar(nombre, b0[1], y[-1][1], "acciones")
+        except Exception as e:
+            avisos_r.append(f"{nombre} ({e})")
+    # Bonos en dólares: precio en pesos + cupones y amortizaciones cobrados (pasados a pesos al MEP del día de pago)
+    for t in ("GD30", "AL30"):
+        try:
+            h = sorted((x["date"], x["c"]) for x in get_json(HIST_BONO_URL.format(t=t)) if isinstance(x, dict) and x.get("c"))
+            vivo = {x["symbol"]: x for x in get_json(BONOS_URL)}.get(t)
+            p1 = vivo["c"] if vivo and vivo.get("c") else h[-1][1]
+            b0 = base(h)
+            cobrado = sum((cup + am) * (mep_en(f.isoformat()) or mep1) for f, cup, am, _r in flujos_bono(t) if ini < f.isoformat() <= hoy.isoformat())
+            agregar(t, b0[1], p1 + cobrado, "bonos")
+        except Exception as e:
+            avisos_r.append(f"{t} ({e})")
+    # Dólares
+    try:
+        o = serie(4, desde)
+        agregar("Dólar oficial", base([(x["fecha"], x["valor"]) for x in o])[1], o[-1]["valor"], "dolar")
+    except Exception as e:
+        avisos_r.append(f"dólar oficial ({e})")
+    agregar("Dólar MEP", mep0, mep1, "dolar")
+    try:  # ArgentinaDatos guarda cada cierre con fecha del día siguiente
+        bl = sorted((x["fecha"], float(x["venta"])) for x in get_json(DOLARES_URL.format(casa="blue")) if x.get("venta"))
+        b0 = min((x for x in bl if x[0] > ini), default=None)
+        b1 = json.load(open(BLUE_ARCHIVO, encoding="utf-8")) if os.path.exists(BLUE_ARCHIVO) else {}
+        agregar("Dólar blue", b0[1] if b0 else None, (list(b1.values())[-1] if b1 else bl[-1][1]), "dolar")
+    except Exception as e:
+        avisos_r.append(f"dólar blue ({e})")
+    # Plazo fijo tradicional (renovando a la tasa promedio a 30 días) y UVA
+    try:
+        tasas = serie(12, desde)
+        acum, ultima = 1.0, None
+        d = dt.date.fromisoformat(ini) + dt.timedelta(days=1)
+        tmap = {x["fecha"]: x["valor"] for x in tasas}
+        while d <= hoy:
+            f = d.isoformat()
+            ultima = tmap.get(f, ultima) or max((x for x in tasas if x["fecha"] <= f), key=lambda x: x["fecha"], default={"valor": 0})["valor"]
+            acum *= 1 + ultima / 100 / 365
+            d += dt.timedelta(days=1)
+        out.append({"activo": "Plazo fijo", "rend": round((acum - 1) * 100, 1), "tipo": "pesos"})
+    except Exception as e:
+        avisos_r.append(f"plazo fijo ({e})")
+    try:
+        u = serie(31, desde)
+        u0 = base([(x["fecha"], x["valor"]) for x in u])
+        u1 = max((x for x in u if x["fecha"] <= hoy.isoformat()), key=lambda x: x["fecha"])
+        dias = (hoy - dt.date.fromisoformat(ini)).days
+        agregar("Plazo fijo UVA", u0[1], u1["valor"] * (1 + 0.01 * dias / 365), "pesos")  # UVA + 1 % anual
+    except Exception as e:
+        avisos_r.append(f"plazo fijo UVA ({e})")
+    try:  # Boncap T15E7: el histórico no está en la fuente, el precio base se carga en config.json
+        pb = cfg_r.get("T15E7_precio_base")
+        if pb:
+            vivo = {x["symbol"]: x for x in get_json(BONOS_URL)}.get("T15E7")
+            agregar("Boncap T15E7", float(pb), vivo["c"] if vivo else None, "pesos")
+    except Exception as e:
+        avisos_r.append(f"T15E7 ({e})")
+    # Inflación del período: oficial hasta el último mes publicado + estimación proporcional del mes en curso
+    infl = None
+    m_ = [x for x in inflacion.get("mensual", []) if x["mes"].startswith(str(hoy.year))]
+    if m_:
+        acum = 1.0
+        for x in m_:
+            acum *= 1 + x["valor"] / 100
+        oficial = (acum - 1) * 100
+        ult = m_[-1]
+        y_, mm_ = int(ult["mes"][:4]), int(ult["mes"][5:])
+        sig = dt.date(y_ + (mm_ == 12), mm_ % 12 + 1, 1)
+        if hoy >= sig:
+            dias_mes = ((sig.replace(day=28) + dt.timedelta(days=4)).replace(day=1) - sig).days
+            acum *= 1 + ult["valor"] / 100 * ((hoy - sig).days + 1) / dias_mes
+        infl = {"oficial": round(oficial, 1), "hasta": ult["mes"], "estimada": round((acum - 1) * 100, 1)}
+    return {"desde": ini, "activos": sorted(out, key=lambda x: x["rend"]), "inflacion": infl}, avisos_r
+
+
 def dia_habil_siguiente(d):
     d += dt.timedelta(days=1)
     while d.weekday() >= 5:
@@ -1332,6 +1439,8 @@ def main():
     except Exception as e:
         aviso(f"no se pudieron traer los bonos ({e})")
 
+    # --- Rendimientos del año (se calcula después del MEP del AL30, que usa)
+    rendimientos = None
     # --- Futuros de índices y commodities
     mercados = []
     try:
@@ -1831,6 +1940,12 @@ def main():
         pass
     compras = mezclar(api_c, "compra", extras)
     reservas = mezclar(api_r, "reservas", extras)
+    try:
+        rendimientos, av_r = rendimientos_anio(hoy, inflacion, cfg.get("rendimientos", {}))
+        if av_r:
+            aviso("rendimientos del año: faltan " + ", ".join(av_r))
+    except Exception as e:
+        aviso(f"no se pudieron calcular los rendimientos del año ({e})")
     datos = {
         "compras": compras,
         "reservas": reservas,
@@ -1848,6 +1963,7 @@ def main():
         "bonos": bonos,
         "adrs": adrs,
         "mercados": mercados,
+        "rendimientos": rendimientos,
         "reservasNetas": reservas_netas,
         "indicadores": {k: v[-2:] for k, v in
                         {"reservas": reservas, "riesgo": mezclar(rp, "riesgo", extras), "minorista": tc, "tamar": tamar, "badlar": badlar}.items()},
@@ -2326,6 +2442,12 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <div class="phead"><h2 id="mepbrt">Dólar MEP real ajustado por tipo de cambio real con Brasil</h2></div>
     <div class="chartbox" style="height:360px"><canvas id="c17" aria-label="Dólar MEP ajustado por el tipo de cambio real bilateral con Brasil desde 2001"></canvas></div>
     <p class="n" id="nmepbr" style="margin:8px 0 0"></p>
+  </section>
+
+  <section data-sec="adrs" class="panel" id="prend">
+    <div class="phead"><h2 id="rendt">Rendimientos del año en pesos</h2></div>
+    <div class="chartbox" style="height:380px"><canvas id="c34" aria-label="Rendimiento en pesos de cada activo en el año, comparado con la inflación"></canvas></div>
+    <p class="n" id="nrend" style="margin:8px 0 0"></p>
   </section>
 
   <section data-sec="adrs" class="panel" id="pmerc">
@@ -3053,6 +3175,27 @@ function itcrm(){
 document.querySelectorAll("[data-it]").forEach(b=>b.onclick=()=>{itAnios=b.dataset.it;document.querySelectorAll("[data-it]").forEach(x=>x.setAttribute("aria-pressed",x===b));itcrm();});
 setTimeout(itcrm,0);
 
+// Rendimientos del año
+let c34;
+function rendimientos(){
+  const R=D.rendimientos, panel=document.getElementById("prend");
+  if(!R||!R.activos||!R.activos.length){panel.style.display="none";return;}
+  const A=R.activos, I=R.inflacion, inf=I?I.estimada:null, m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  const col=v=>v<0?"#ff3b3b":inf!=null&&v>=inf?"#00d26a":"#3a8ee6";
+  c34?.destroy();
+  c34=new Chart(document.getElementById("c34"),{data:{labels:A.map(x=>x.activo),datasets:[
+      {type:"bar",label:"Rendimiento en pesos",data:A.map(x=>x.rend),backgroundColor:A.map(x=>col(x.rend)),order:2},
+      ...(inf!=null?[{type:"line",label:`Inflación estimada a hoy (${fmt(inf,1)} %)`,data:A.map(()=>inf),borderColor:"#ff3b3b",borderDash:[8,5],borderWidth:2.5,pointRadius:0,order:1}]:[])]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:m,boxWidth:12,font}},
+      etiquetas:{lista:A.map((x,i)=>[0,i,(x.rend>0?"+":"")+fmt(x.rend,1)+"%",x.rend<0?"#ff3b3b":"#dddddd",x.rend>=0]),simple:true},
+      tooltip:{callbacks:{label:it=>it.datasetIndex===0?`${fmt(it.raw,1)} % en pesos${inf!=null?` · real: ${fmt(((1+it.raw/100)/(1+inf/100)-1)*100,1)} %`:""}`:it.dataset.label}}},
+      scales:{x:{grid:{display:false},ticks:{color:"#ddd",font,maxRotation:0,autoSkip:false}},y:{grid:{color:g},ticks:{color:m,font,callback:v=>v+" %"}}}},plugins:[etiquetas]});
+  const gan=A.filter(x=>inf!=null&&x.rend>=inf).map(x=>x.activo);
+  document.getElementById("rendt").textContent=`Rendimientos ${R.desde.slice(0,4)==="2025"?"2026":+R.desde.slice(0,4)+1} en pesos (desde el ${dmy(R.desde)})`;
+  document.getElementById("nrend").textContent=`Variación en pesos desde el último cierre del año anterior. Verde: le ganó a la inflación; azul: positivo pero debajo de la inflación; rojo: negativo. ${I?`Inflación: ${fmt(I.oficial,1)} % oficial hasta ${mesCorto(I.hasta)} y ${fmt(I.estimada,1)} % estimada a hoy (el mes en curso, proporcional a la inflación del último mes). `:""}${gan.length?`Le ganan a la inflación: ${gan.join(", ")}. `:""}Bonos GD30 y AL30 con cupones y amortizaciones cobrados; S&P 500 y Bitcoin pasados a pesos al MEP; plazo fijo renovando a la tasa promedio a 30 días; UVA más 1 % anual. Fuentes: data912, Yahoo Finance, BCRA, ArgentinaDatos, DolarAPI, INDEC.`;
+}
+setTimeout(rendimientos,0);
+
 // Big Mac
 let c27, bmVista="sel";
 const BM_SEL=["CHE","URY","NOR","GBR","SWE","EUZ","DNK","TUR","MEX","USA","ARG","CHL","BRA","CHN","KOR","JPN","IND"];
@@ -3266,7 +3409,7 @@ function servicios(){
   document.getElementById("nserv").textContent=`Último: USD ${fmt(u[i],0)} M en los 12 meses a ${mesCorto(u[0])}${a?`, ${fmt((u[i]/a[i]-1)*100,0)} % más que un año antes`:""}. Son los dólares que ingresan por el mercado de cambios por cada servicio (balance cambiario del BCRA), por eso pueden diferir de las estadísticas del INDEC. Fuente: BCRA vía datos.gob.ar.`;
 }
 document.querySelectorAll("[data-sv]").forEach(b=>b.onclick=()=>{svVista=b.dataset.sv;document.querySelectorAll("[data-sv]").forEach(x=>x.setAttribute("aria-pressed",x===b));servicios();});
-setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();salarioMandatos();energia();relativos();},0);
+setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();salarioMandatos();energia();relativos();},0);
 
 // Semáforo de actividad
 function semaforoTabla(){
@@ -3519,7 +3662,7 @@ function render(){
 
 }
 document.querySelectorAll("[data-mode]").forEach(b=>b.onclick=()=>{mode=b.dataset.mode;document.querySelectorAll("[data-mode]").forEach(x=>x.setAttribute("aria-pressed",x===b));render();});
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();salarioMandatos();energia();relativos();inflacion();});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();salarioMandatos();energia();relativos();inflacion();});
 render();
 function avisos(){const A=D.avisos||[], el=document.getElementById("avisos"); el.innerHTML=A.length?`<section class="panel" style="border-color:var(--bad)"><div class="k" style="color:var(--bad)">Avisos de la última actualización</div><ul class="n" style="margin:6px 0 0;padding-left:18px">${A.map(a=>`<li>${a.replace(/</g,"&lt;")}</li>`).join("")}</ul></section>`:"";}
 avisos();
@@ -3552,7 +3695,7 @@ document.addEventListener("keydown",e=>{ if(e.target.tagName==="SELECT"||e.targe
 })();
 (function reloj(){const el=document.getElementById("clk"); const f=()=>{el.textContent=new Date().toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})+" ART";}; f(); setInterval(f,30000);})();
 // Redibuja cuando termina de cargar la tipografía, para que las etiquetas midan bien
-if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();salarioMandatos();energia();relativos();inflacion();});
+if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();salarioMandatos();energia();relativos();inflacion();});
 // Recarga la página cada 10 minutos para tomar la última versión generada
 // Recarga salteando la caché del navegador (agrega ?t=… al link)
 const recargar=()=>location.replace(location.pathname+"?t="+Date.now()+location.hash);
