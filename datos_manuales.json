@@ -75,5 +75,11 @@
     "compra": 3.0,
     "reservas": 49443.0,
     "riesgo": 910.0
+  },
+  {
+    "fecha": "2026-11-20",
+    "compra": 0.0,
+    "reservas": 49362.0,
+    "riesgo": 1065.0
   }
 ]
