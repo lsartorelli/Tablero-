@@ -1,12 +1,12 @@
 {
   "escenarios": {
-    "_ayuda": "precio_0 y precio_100 son tus precios objetivo con 0 % y 100 % de probabilidad. fuente: bono (data912), yahoo (ticker de Yahoo Finance) o merval_usd (Merval / CCL). precio (solo bonos): limpio_ccl, sucio_ccl, limpio_mep o sucio_mep.",
+    "_ayuda": "precio_0 y precio_100 son tus precios objetivo con 0 % y 100 % de probabilidad. fuente: bono (data912), yahoo (ticker de Yahoo Finance) o merval_usd (Merval / CCL). precio (solo bonos): limpio_ccl, sucio_ccl, limpio_mep o sucio_mep. escala (Merval): multiplica el Merval en dólares CCL para llevarlo a la unidad de tus objetivos.",
     "filas": [
       0,
-      10,
       20,
-      40,
+      30,
       45,
+      50,
       100
     ],
     "activos": [
@@ -22,16 +22,17 @@
         "nombre": "GD35",
         "fuente": "bono",
         "simbolo": "GD35",
-        "precio_0": 83.25,
+        "precio_0": 83.08,
         "precio_100": 45.0,
         "precio": "limpio_ccl"
       },
       {
-        "nombre": "Merval USD",
+        "nombre": "Merval",
         "fuente": "merval_usd",
         "simbolo": "^MERV",
-        "precio_0": 2380,
-        "precio_100": 475
+        "escala": 0.03144,
+        "precio_0": 82,
+        "precio_100": 20
       }
     ]
   },
@@ -57,114 +58,74 @@
     "riesgo_pierde": 1390
   },
   "preocupaciones": {
-    "_ayuda": "Ranking de preocupaciones de la Encuesta de Satisfacción Política y Opinión Pública (UdeSA). No tiene fuente abierta: actualizá a mano las fechas y el ranking (1 = la mayor preocupación).",
-    "fuente": "FMyA en base a UdeSA",
-    "fechas": [
-      "nov-23",
-      "ago-26"
+    "_ayuda": "Porcentaje de menciones de cada problema en la encuesta ESPOP de la UdeSA (pregunta de respuesta múltiple). No tiene datos abiertos: cuando salga una medición nueva, agregá el mes en 'meses' y el valor en cada tema (null si no se publicó).",
+    "fuente": "ESPOP, Universidad de San Andrés (según informes y notas de prensa)",
+    "meses": [
+      "2025-09",
+      "2026-05",
+      "2026-07",
+      "2026-08",
+      "2026-09",
+      "2026-10"
     ],
-    "ranking": [
-      [
-        "Desempleo",
-        8,
-        1
+    "temas": {
+      "Falta de trabajo": [
+        31,
+        37,
+        38,
+        39,
+        39,
+        39
       ],
-      [
-        "Bajos salarios",
-        7,
-        2
+      "Bajos salarios": [
+        34,
+        37,
+        35,
+        36,
+        36,
+        35
       ],
-      [
-        "Corrupción",
-        2,
-        3
+      "Corrupción": [
+        35,
+        36,
+        38,
+        34,
+        29,
+        30
       ],
-      [
-        "Pobreza",
-        5,
-        4
+      "Pobreza": [
+        null,
+        30,
+        27,
+        30,
+        29,
+        31
       ],
-      [
-        "Políticos",
-        4,
-        5
+      "Inseguridad": [
+        28,
+        26,
+        null,
+        null,
+        null,
+        24
       ],
-      [
-        "Inseguridad",
-        3,
-        6
+      "Los políticos": [
+        null,
+        26,
+        null,
+        null,
+        null,
+        22
       ],
-      [
-        "Endeudamiento externo",
-        6,
-        7
-      ],
-      [
-        "Inflación",
-        1,
-        8
-      ],
-      [
-        "Justicia",
-        9,
-        9
-      ],
-      [
-        "Educación",
-        9,
-        10
-      ],
-      [
-        "Narcotráfico",
-        11,
-        11
-      ],
-      [
-        "Salud",
-        12,
-        11
-      ],
-      [
-        "Obra pública",
-        16,
-        13
-      ],
-      [
-        "Acceso a vivienda",
-        12,
-        14
-      ],
-      [
-        "Policía",
-        14,
-        15
-      ],
-      [
-        "Villas",
-        15,
-        16
-      ],
-      [
-        "Transporte",
-        16,
-        16
-      ],
-      [
-        "Inmigración",
-        19,
-        16
-      ],
-      [
-        "Epidemias",
-        16,
-        19
-      ],
-      [
-        "Cambio climático",
-        19,
+      "Inflación": [
+        null,
+        22,
+        17,
+        null,
+        null,
         19
       ]
-    ]
+    }
   },
   "mora_estimada": {
     "_ayuda": "Adelantos privados de la mora (por ejemplo de la consultora 1816 con la Central de Deudores) para los meses que el BCRA todavía no publicó. Se muestran como estimados y se ignoran solos cuando sale el dato oficial.",
@@ -174,5 +135,25 @@
       "empresas": 3.82,
       "fuente": "1816 en base a la Central de Deudores"
     }
+  },
+  "ipc_manual": {
+    "_ayuda": "Inflación del INDEC para usar el mismo día que se publica, antes de que la cargue la API del BCRA (suele tardar uno o dos días). Cuando la API la tiene, este dato se ignora solo.",
+    "2026-10": {
+      "mensual": 2.2,
+      "interanual": 33.1
+    }
+  },
+  "precios_relativos": {
+    "_ayuda": "Gráfico de ajuste de precios relativos: mes base (AAAA-MM) y gasto mensual de hoy del hogar de referencia.",
+    "base": "2023-11",
+    "gasto_hogar": 2000000
+  },
+  "rendimientos": {
+    "_ayuda": "Gráfico de rendimientos del año en pesos. T15E7: precio de cierre del último día hábil del año anterior (por cada 100 de valor nominal), porque la fuente no tiene su histórico. Si queda en null, no se muestra.",
+    "T15E7_precio_base": null
+  },
+  "icg_manual": {
+    "_ayuda": "Índice de Confianza en el Gobierno de la UTDT para los meses que ya publicó la universidad pero datos.gob.ar todavía no cargó (suele tardar semanas). Cuando la serie oficial lo trae, este dato se ignora solo.",
+    "2026-11": 2.04
   }
 }

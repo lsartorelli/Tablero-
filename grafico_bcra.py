@@ -165,6 +165,11 @@ CONFIG_DEFECTO = {
                   "(por cada 100 de valor nominal), porque la fuente no tiene su histórico. Si queda en null, no se muestra.",
         "T15E7_precio_base": None
     },
+    "icg_manual": {
+        "_ayuda": "Índice de Confianza en el Gobierno de la UTDT para los meses que ya publicó la universidad pero datos.gob.ar "
+                  "todavía no cargó (suele tardar semanas). Cuando la serie oficial lo trae, este dato se ignora solo.",
+        "2026-11": 2.04
+    },
     "reeleccion": {
         "_ayuda": "Riesgo país esperado si Milei es reelecto (riesgo_gana) y si pierde (riesgo_pierde). "
                   "La probabilidad implícita se interpola entre ambos. Valores calibrados con la serie de FMyA.",
@@ -1729,6 +1734,12 @@ def main():
         except Exception:
             pass
         icg = [[r[0][:7], r[1]] for r in get_json(SERIES_URL.format(ids="370.3_ICG_NIVEL_RAL_0_0_17_94") + "&start_date=2024-01-01")["data"] if r[1] is not None]
+        # meses que la UTDT ya publicó pero datos.gob.ar todavía no cargó (config.json, "icg_manual")
+        ya_icg = {m for m, _ in icg}
+        for mes, v in cfg.get("icg_manual", {}).items():
+            if not mes.startswith("_") and mes not in ya_icg and v is not None:
+                icg.append([mes, float(v)])
+        icg.sort()
         historicos["reeleccion"] = {"riesgo": sorted(rr.items()), "icg": icg,
                                     "gana": rcfg["riesgo_gana"], "pierde": rcfg["riesgo_pierde"]}
     except Exception as e:
