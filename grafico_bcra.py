@@ -964,6 +964,103 @@ def base_amplia_real(hoy, ipc_m):
             "ultimo_dia": ult_dia}
 
 
+def desestacionalizar(serie, periodo=12):
+    """Ajuste estacional simple (razón a la media móvil centrada, factores promedio por mes o trimestre)."""
+    ks = sorted(serie)
+    v = [serie[k] for k in ks]
+    h, ratios = periodo // 2, {}
+    for i in range(h, len(v) - h):
+        mm = (sum(v[i - h:i + h]) + sum(v[i - h + 1:i + h + 1])) / (2 * periodo)
+        ratios.setdefault(i % periodo, []).append(v[i] / mm)
+    f = {k: sum(x) / len(x) for k, x in ratios.items()}
+    media = sum(f.values()) / periodo
+    return {k: v[i] / (f[i % periodo] / media) for i, k in enumerate(ks)}
+
+
+def series_ds(ids, desde=None):
+    j = get_json(SERIES_URL.format(ids=",".join(ids)) + (f"&start_date={desde}" if desde else ""))
+    cols = {m.get("field", {}).get("id"): i for i, m in enumerate(j["meta"])}
+    return {i: {r[0][:7]: r[cols[i]] for r in j["data"] if r[cols[i]] is not None} for i in ids}
+
+
+def indicadores_extra():
+    """Sectores del EMAE, consumo privado, balanza energética, regulados vs núcleo, resultado fiscal y PBI."""
+    out, av = {}, []
+    try:
+        S = {"Agro": "11.3_ISOM_2004_M_39", "Industria": "11.3_VMASD_2004_M_23", "Comercio": "11.3_AGCS_2004_M_41",
+             "Energía y minería": "11.3_ISD_2004_M_26", "Construcción": "11.3_VMATC_2004_M_12"}
+        d = series_ds(list(S.values()), "2012-01-01")
+        sec = {}
+        for n, i in S.items():
+            a = desestacionalizar(d[i])
+            b = a.get("2023-11")
+            sec[n] = [[k, round(a[k] / b * 100, 1)] for k in sorted(a) if k >= "2023-09"]
+        out["sectores"] = sec
+    except Exception as e:
+        av.append(f"sectores del EMAE ({e})")
+    try:
+        c = series_ds(["4.2_MGCP_2004_T_25"], "2010-01-01")["4.2_MGCP_2004_T_25"]
+        a = desestacionalizar(c, 4)
+        b = a.get("2017-01")
+        tri = lambda k: f"{['I', 'II', 'III', 'IV'][(int(k[5:7]) - 1) // 3]}-{k[2:4]}"
+        out["consumo"] = [[tri(k), round(a[k] / b * 100, 1), k] for k in sorted(a) if k >= "2017-01"]
+    except Exception as e:
+        av.append(f"consumo privado ({e})")
+    try:
+        d = series_ds(["75.3_ITCE_0_M_30", "74.3_IICL_0_M_42"], "2003-01-01")
+        x, m = d["75.3_ITCE_0_M_30"], d["74.3_IICL_0_M_42"]
+        ks = sorted(k for k in x if k in m)
+        out["energia_bal"] = [[ks[i], round(sum(x[k] - m[k] for k in ks[i - 11:i + 1]))] for i in range(11, len(ks))]
+    except Exception as e:
+        av.append(f"balanza energética ({e})")
+    try:
+        d = series_ds(["148.3_IREGULANAL_DICI_M_22", "148.3_INUCLEONAL_DICI_M_19"], "2019-12-01")
+        r, n = d["148.3_IREGULANAL_DICI_M_22"], d["148.3_INUCLEONAL_DICI_M_19"]
+        b = r["2019-12"] / n["2019-12"]
+        out["regulados"] = [[k, round((r[k] / n[k] / b - 1) * 100, 1)] for k in sorted(r) if k in n]
+    except Exception as e:
+        av.append(f"precios regulados ({e})")
+    try:
+        d = series_ds(["452.3_RESULTADO_ERO_0_M_20_25", "452.3_RESULTADO_RIO_0_M_18_54"], "2016-01-01")
+        fin, pri = d["452.3_RESULTADO_ERO_0_M_20_25"], d["452.3_RESULTADO_RIO_0_M_18_54"]
+        pib = series_ds(["9.2_PPC_2004_T_22"], "2015-01-01")["9.2_PPC_2004_T_22"]
+        # la serie trimestral del PBI nominal está anualizada: el PBI de un año es el promedio de sus 4 trimestres
+        def pib_12m(k):  # PBI de los 4 trimestres que terminan en el de k (o el último disponible)
+            q = sorted(x for x in pib if x <= k)
+            return sum(pib[x] for x in q[-4:]) / 4 if len(q) >= 4 else None
+        anual = []
+        for y in range(2016, 2100):
+            ms = [f"{y}-{m:02d}" for m in range(1, 13)]
+            if not all(m in fin for m in ms):
+                break
+            pb = sum(pib.get(f"{y}-{m:02d}", 0) for m in (1, 4, 7, 10)) / 4
+            if pb:
+                anual.append([str(y), round(sum(fin[m] for m in ms) / pb * 100, 2), round(sum(pri[m] for m in ms) / pb * 100, 2)])
+        ks = sorted(fin)
+        u = ks[-1]
+        f12 = sum(fin[k] for k in ks[-12:]); p12 = sum(pri[k] for k in ks[-12:])
+        pb12 = pib_12m(u)
+        # el PBI de los trimestres que faltan se aproxima con el último dato disponible
+        movil = [u, round(f12 / pb12 * 100, 2), round(p12 / pb12 * 100, 2)] if pb12 else None
+        out["fiscal"] = {"anual": anual, "movil": movil}
+    except Exception as e:
+        av.append(f"resultado fiscal ({e})")
+    try:
+        e_ = series_ds(["143.3_NO_PR_2004_A_31"], "2004-01-01")["143.3_NO_PR_2004_A_31"]
+        anios = sorted({k[:4] for k in e_})
+        res = []
+        for y in anios[1:]:
+            ms = [k for k in e_ if k[:4] == y]
+            prev = [f"{int(y) - 1}{k[4:]}" for k in ms]
+            if all(p in e_ for p in prev):
+                g = (sum(e_[k] for k in ms) / sum(e_[p] for p in prev) - 1) * 100
+                res.append([y, round(g, 1), len(ms)])
+        out["pbi"] = res
+    except Exception as e:
+        av.append(f"crecimiento del PBI ({e})")
+    return out, av
+
+
 def dia_habil_siguiente(d):
     d += dt.timedelta(days=1)
     while d.weekday() >= 5:
@@ -1934,6 +2031,13 @@ def main():
                                                round(hab[m], 2), bono_de(m)] for m in meses_j]}
     except Exception as e:
         aviso(f"no se pudo armar la jubilación mínima real ({e})")
+    try:
+        extra_ind, av_x = indicadores_extra()
+        historicos.update(extra_ind)
+        if av_x:
+            aviso("faltan: " + ", ".join(av_x))
+    except Exception as e:
+        aviso(f"no se pudieron armar los indicadores de actividad adicionales ({e})")
     try:  # Brasil: reservas internacionales y dólar (Banco Central do Brasil, series SGS 13621 y 1)
         sgs = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.{id}/dados?formato=json&dataInicial={d}"
         conv = lambda f: f[6:10] + "-" + f[3:5] + "-" + f[0:2]
@@ -2404,6 +2508,30 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <p class="n" id="nene" style="margin:8px 0 0"></p>
   </section>
 
+  <section data-sec="actividad" class="panel" id="psec">
+    <div class="phead"><h2 id="psect"></h2></div>
+    <div class="chartbox" style="height:380px"><canvas id="c37" aria-label="Actividad por sectores, desestacionalizada, noviembre 2023 = 100"></canvas></div>
+    <p class="n" id="psecn" style="margin:8px 0 0"></p>
+  </section>
+
+  <section data-sec="actividad" class="panel" id="pcons">
+    <div class="phead"><h2 id="pconst"></h2></div>
+    <div class="chartbox" style="height:340px"><canvas id="c38" aria-label="Consumo privado desestacionalizado trimestral"></canvas></div>
+    <p class="n" id="pconsn" style="margin:8px 0 0"></p>
+  </section>
+
+  <section data-sec="actividad" class="panel" id="ppbi">
+    <div class="phead"><h2 id="ppbit"></h2></div>
+    <div class="chartbox" style="height:320px"><canvas id="c39" aria-label="Crecimiento anual del PBI"></canvas></div>
+    <p class="n" id="ppbin" style="margin:8px 0 0"></p>
+  </section>
+
+  <section data-sec="actividad" class="panel" id="pbal">
+    <div class="phead"><h2 id="pbalt"></h2></div>
+    <div class="chartbox" style="height:320px"><canvas id="c40" aria-label="Balanza comercial energética, suma de 12 meses"></canvas></div>
+    <p class="n" id="pbaln" style="margin:8px 0 0"></p>
+  </section>
+
   <section data-sec="actividad" class="panel" id="pemae">
     <div class="phead"><h2>Actividad económica (EMAE desestacionalizado, 2004 = 100)</h2></div>
     <div class="chartbox" style="height:360px"><canvas id="c24" aria-label="EMAE desestacionalizado desde 2010 con cambios de gobierno"></canvas></div>
@@ -2455,6 +2583,12 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <div class="gobs" id="recards"></div>
     <div class="chartbox" style="height:380px"><canvas id="c23" aria-label="Probabilidad de reelección implícita en el riesgo país y el Índice de Confianza en el Gobierno"></canvas></div>
     <p class="n" id="nre" style="margin:8px 0 0"></p>
+  </section>
+
+  <section data-sec="bonos" class="panel" id="pfis">
+    <div class="phead"><h2 id="pfist"></h2></div>
+    <div class="chartbox" style="height:340px"><canvas id="c42" aria-label="Resultado fiscal del Sector Público Nacional en porcentaje del PBI"></canvas></div>
+    <p class="n" id="pfisn" style="margin:8px 0 0"></p>
   </section>
 
   <section data-sec="bonos" class="panel" id="ppre">
@@ -2606,6 +2740,12 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <div class="phead"><h2 id="relt">Ajuste de precios relativos</h2></div>
     <div class="chartbox" id="relbox" style="height:560px"><canvas id="c32" aria-label="Cambio del gasto mensual por rubro por el cambio de precios relativos"></canvas></div>
     <p class="n" id="nrel" style="margin:8px 0 0"></p>
+  </section>
+
+  <section data-sec="ipc" class="panel" id="preg">
+    <div class="phead"><h2 id="pregt"></h2></div>
+    <div class="chartbox" style="height:320px"><canvas id="c41" aria-label="Precios regulados contra IPC núcleo"></canvas></div>
+    <p class="n" id="pregn" style="margin:8px 0 0"></p>
   </section>
 
   <section data-sec="ipc" class="panel" id="pjub">
@@ -3422,6 +3562,63 @@ function bmaReal(){
 }
 setTimeout(bmaReal,0);
 
+// Paneles de actividad, precios y fiscal (series oficiales, se actualizan solas)
+const graf={};
+function nuevo(id,cfg){graf[id]?.destroy(); cfg.options.layout={padding:{top:24,right:48,bottom:4}}; graf[id]=new Chart(document.getElementById(id),cfg);}
+function txt(pid,t,n){document.getElementById(pid+"t").textContent=t; document.getElementById(pid+"n").textContent=n;}
+function panelesExtra(){
+  const H=D.historicos||{}, m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  const ocultar=id=>document.getElementById(id).style.display="none";
+  // 1) Actividad por sectores
+  if(H.sectores){const COL={"Agro":"#3a8ee6","Industria":"#ff66c4","Comercio":"#00d26a","Energía y minería":"#b388ff","Construcción":"#ff9a3c"};
+    const L=H.sectores.Agro.map(x=>x[0]); const lab=[];
+    const ds=Object.entries(H.sectores).map(([n,v],i)=>{lab.push([i,v.length-1,fmt(v[v.length-1][1],0),COL[n]]); return {label:n,data:v.map(x=>x[1]),borderColor:COL[n],borderWidth:2.4,pointRadius:0,tension:.2};});
+    nuevo("c37",{type:"line",data:{labels:L.map(mesCorto),datasets:[...ds,{label:"_100",data:L.map(()=>100),borderColor:"#777",borderWidth:1,pointRadius:0}]},
+      options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},plugins:{legend:{labels:{color:m,boxWidth:12,font,filter:it=>!it.text.startsWith("_")}},etiquetas:{lista:lab,simple:true},
+        tooltip:{filter:it=>it.datasetIndex<5,callbacks:{label:it=>`${it.dataset.label}: ${fmt(it.raw,1)}`}}},
+        scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:14,maxRotation:0}},y:{grid:{color:g},ticks:{color:m,font}}}},plugins:[etiquetas]});
+    txt("psec",`Actividad económica por sectores (desestacionalizada, nov-23 = 100) · hasta ${mesCorto(L[L.length-1])}`,`EMAE del INDEC por sector, desestacionalizado por el tablero (razón a la media móvil de 12 meses), con base 100 en noviembre de 2023. Energía y minería = explotación de minas y canteras. Arriba de 100: produce más que al inicio del gobierno. Fuente: INDEC vía datos.gob.ar.`);
+  } else ocultar("psec");
+  // 2) Consumo privado
+  if(H.consumo){const C=H.consumo, V=C.map(x=>x[1]), iU=V.length-1, iMx=V.indexOf(Math.max(...V)), iMn=V.indexOf(Math.min(...V.slice(C.findIndex(x=>x[2]>="2023-10"))));
+    nuevo("c38",{type:"line",data:{labels:C.map(x=>x[0]),datasets:[{label:"Consumo privado (I-17 = 100)",data:V,borderColor:"#b388ff",borderWidth:2.6,pointRadius:2,tension:.2}]},
+      options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},etiquetas:{lista:[[0,iU,`${C[iU][0]}: ${fmt(V[iU],1)}`,"#b388ff"],[0,iMx,`Máx. ${C[iMx][0]}`,"#00d26a"],[0,iMn,`Mín. ${C[iMn][0]}`,"#ff3b3b",false]]},tooltip:{callbacks:{label:it=>fmt(it.raw,1)}}},
+        scales:{x:{grid:{display:false},ticks:{color:m,font,maxRotation:90}},y:{grid:{color:g},ticks:{color:m,font}}}},plugins:[etiquetas]});
+    txt("pcons","Consumo privado (desestacionalizado, I-17 = 100)",`Consumo privado trimestral en pesos constantes del INDEC (cuentas nacionales), desestacionalizado por el tablero. Último: ${C[iU][0]}, ${fmt(V[iU],1)}. Se actualiza con cada informe de avance del nivel de actividad. Fuente: INDEC vía datos.gob.ar.`);
+  } else ocultar("pcons");
+  // 3) Crecimiento del PBI
+  if(H.pbi){const P=H.pbi.filter(x=>+x[0]>=2015), u=P[P.length-1];
+    nuevo("c39",{type:"bar",data:{labels:P.map(x=>x[2]<12?`${x[0]}*`:x[0]),datasets:[{data:P.map(x=>x[1]),backgroundColor:P.map(x=>x[2]<12?"#3a8ee6":x[1]>=0?"#c9b38a":"#c9b38a")}]},
+      options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},etiquetas:{lista:P.map((x,i)=>[0,i,(x[1]>0?"+":"")+fmt(x[1],1)+"%","#ddd",x[1]>=0]),simple:true},tooltip:{callbacks:{label:it=>`${fmt(it.raw,1)} %`}}},
+        scales:{x:{grid:{display:false},ticks:{color:"#ddd",font}},y:{grid:{color:g},ticks:{color:m,font,callback:v=>v+" %"}}}},plugins:[etiquetas]});
+    txt("ppbi","Crecimiento de la actividad (variación anual en %)",`Variación del promedio anual del EMAE desestacionalizado del INDEC, que anticipa el PBI. * ${u[0]}: primeros ${u[2]} meses contra los mismos meses del año anterior (en azul). Fuente: INDEC vía datos.gob.ar.`);
+  } else ocultar("ppbi");
+  // 4) Balanza energética
+  if(H.energia_bal){const B=H.energia_bal, V=B.map(x=>x[1]), iU=V.length-1, iMn=V.indexOf(Math.min(...V));
+    nuevo("c40",{type:"line",data:{labels:B.map(x=>mesCorto(x[0])),datasets:[{label:"Saldo energético 12 meses",data:V,borderColor:"#1aa3b5",borderWidth:2.6,pointRadius:0,tension:.2,fill:{target:"origin",above:"#1aa3b522",below:"#ff3b3b22"}}]},
+      options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},etiquetas:{lista:[[0,iU,"USD "+fmt(V[iU],0)+" M","#1aa3b5"],[0,iMn,"USD "+fmt(V[iMn],0)+" M","#ff3b3b",false]]},tooltip:{callbacks:{label:it=>`USD ${fmt(it.raw,0)} M`}}},
+        scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:14,maxRotation:0}},y:{grid:{color:g},ticks:{color:m,font,callback:v=>fmt(v,0)}}}},plugins:[etiquetas]});
+    txt("pbal",`Balanza comercial energética (suma de 12 meses, millones de USD) · a ${mesCorto(B[iU][0])}`,`Exportaciones de combustibles y energía menos importaciones de combustibles y lubricantes (INDEC, intercambio comercial). Récord actual: USD ${fmt(V[iU],0)} M en 12 meses; mínimo USD ${fmt(V[iMn],0)} M en ${mesCorto(B[iMn][0])}. Fuente: INDEC vía datos.gob.ar.`);
+  } else ocultar("pbal");
+  // 5) Regulados vs núcleo
+  if(H.regulados){const R=H.regulados, V=R.map(x=>x[1]), iU=V.length-1, iMn=V.indexOf(Math.min(...V));
+    nuevo("c41",{type:"line",data:{labels:R.map(x=>mesCorto(x[0])),datasets:[{label:"Regulados vs núcleo",data:V,borderColor:"#e08cff",borderWidth:2.8,pointRadius:0,tension:.2}]},
+      options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},etiquetas:{lista:[[0,iU,fmt(V[iU],1)+"%","#e08cff"],[0,iMn,fmt(V[iMn],1)+"%","#ff3b3b",false]]},tooltip:{callbacks:{label:it=>`${fmt(it.raw,1)} %`}}},
+        scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:12,maxRotation:0}},y:{grid:{color:g},ticks:{color:m,font,callback:v=>v+" %"}}}},plugins:[etiquetas]});
+    txt("preg",`Corrección de precios regulados: regulados contra IPC núcleo (dic-19 = 0) · a ${mesCorto(R[iU][0])}`,`Cuánto más baratos (negativo) están los precios regulados (tarifas, transporte, combustibles, prepagas, etc.) respecto de la inflación núcleo desde diciembre 2019. Mínimo: ${fmt(V[iMn],1)} % en ${mesCorto(R[iMn][0])}; hoy ${fmt(V[iU],1)} %: falta ese tramo para volver a los precios relativos de 2019. Fuente: INDEC vía datos.gob.ar.`);
+  } else ocultar("preg");
+  // 6) Resultado fiscal
+  if(H.fiscal&&H.fiscal.anual.length){const A=[...H.fiscal.anual], mv=H.fiscal.movil; if(mv) A.push([`12m a ${mesCorto(mv[0])}`,mv[1],mv[2]]);
+    nuevo("c42",{type:"bar",data:{labels:A.map(x=>x[0]),datasets:[
+        {label:"Resultado financiero (con intereses)",data:A.map(x=>x[1]),backgroundColor:A.map(x=>x[1]>=0?"#b388ff":"#ffb000")},
+        {label:"Resultado primario (sin intereses)",data:A.map(x=>x[2]),backgroundColor:A.map(x=>x[2]>=0?"#b388ff66":"#ffb00066")}]},
+      options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:m,boxWidth:12,font}},etiquetas:{lista:A.map((x,i)=>[0,i,fmt(x[1],1),"#ddd",x[1]>=0]),simple:true},tooltip:{callbacks:{label:it=>`${it.dataset.label}: ${fmt(it.raw,2)} % del PBI`}}},
+        scales:{x:{grid:{display:false},ticks:{color:"#ddd",font}},y:{grid:{color:g},ticks:{color:m,font,callback:v=>v+" %"}}}},plugins:[etiquetas]});
+    txt("pfis","Resultado fiscal del Sector Público Nacional (% del PBI)",`Resultado financiero (después de pagar intereses de la deuda) y primario del Sector Público Nacional no financiero, base caja, sobre el PBI nominal. La última barra es la suma de los últimos 12 meses contra el PBI de los últimos 4 trimestres publicados. Fuentes: Ministerio de Economía (IMIG) e INDEC vía datos.gob.ar.`);
+  } else ocultar("pfis");
+}
+setTimeout(panelesExtra,0);
+
 // Oro del BCRA
 let c26;
 function oro(){
@@ -3589,7 +3786,7 @@ function servicios(){
   document.getElementById("nserv").textContent=`Último: USD ${fmt(u[i],0)} M en los 12 meses a ${mesCorto(u[0])}${a?`, ${fmt((u[i]/a[i]-1)*100,0)} % más que un año antes`:""}. Son los dólares que ingresan por el mercado de cambios por cada servicio (balance cambiario del BCRA), por eso pueden diferir de las estadísticas del INDEC. Fuente: BCRA vía datos.gob.ar.`;
 }
 document.querySelectorAll("[data-sv]").forEach(b=>b.onclick=()=>{svVista=b.dataset.sv;document.querySelectorAll("[data-sv]").forEach(x=>x.setAttribute("aria-pressed",x===b));servicios();});
-setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();jubilacion();salarioMandatos();energia();relativos();},0);
+setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();jubilacion();panelesExtra();salarioMandatos();energia();relativos();},0);
 
 // Semáforo de actividad
 function semaforoTabla(){
@@ -3842,7 +4039,7 @@ function render(){
 
 }
 document.querySelectorAll("[data-mode]").forEach(b=>b.onclick=()=>{mode=b.dataset.mode;document.querySelectorAll("[data-mode]").forEach(x=>x.setAttribute("aria-pressed",x===b));render();});
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();jubilacion();salarioMandatos();energia();relativos();inflacion();});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();jubilacion();panelesExtra();salarioMandatos();energia();relativos();inflacion();});
 render();
 function avisos(){const A=D.avisos||[], el=document.getElementById("avisos"); el.innerHTML=A.length?`<section class="panel" style="border-color:var(--bad)"><div class="k" style="color:var(--bad)">Avisos de la última actualización</div><ul class="n" style="margin:6px 0 0;padding-left:18px">${A.map(a=>`<li>${a.replace(/</g,"&lt;")}</li>`).join("")}</ul></section>`:"";}
 avisos();
@@ -3875,7 +4072,7 @@ document.addEventListener("keydown",e=>{ if(e.target.tagName==="SELECT"||e.targe
 })();
 (function reloj(){const el=document.getElementById("clk"); const f=()=>{el.textContent=new Date().toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})+" ART";}; f(); setInterval(f,30000);})();
 // Redibuja cuando termina de cargar la tipografía, para que las etiquetas midan bien
-if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();jubilacion();salarioMandatos();energia();relativos();inflacion();});
+if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();jubilacion();panelesExtra();salarioMandatos();energia();relativos();inflacion();});
 // Recarga la página cada 10 minutos para tomar la última versión generada
 // Recarga salteando la caché del navegador (agrega ?t=… al link)
 const recargar=()=>location.replace(location.pathname+"?t="+Date.now()+location.hash);
