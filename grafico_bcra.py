@@ -1061,6 +1061,43 @@ def indicadores_extra():
     return out, av
 
 
+SECTORES_EMPLEO = [
+    ("Agro", "11.3_ISOM_2004_M_39", "324.1_A_AGRICULTAJO__49"), ("Pesca", "11.3_VIPAA_2004_M_5", "324.1_B_PESCA_PUAJO__23"),
+    ("Minería", "11.3_ISD_2004_M_26", "324.1_C_EXPLOTACAJO__44"), ("Industria", "11.3_VMASD_2004_M_23", "324.1_D_INDUSTRIAJO__41"),
+    ("Electricidad, gas y agua", "11.3_ITC_2004_M_21", "324.1_E_ELECT_GAAJO__32"), ("Construcción", "11.3_VMATC_2004_M_12", "324.1_F_CONSTRUCAJO__30"),
+    ("Comercio", "11.3_AGCS_2004_M_41", "324.1_G_COMERCIOAJO__26"), ("Hoteles y restaurantes", "11.3_P_2004_M_20", "324.1_H_HOTELES_AJO__38"),
+    ("Transporte y comunicaciones", "11.3_EMC_2004_M_25", "324.1_I_TRANSPORAJO__58"), ("Intermediación financiera", "11.3_IM_2004_M_25", "324.1_J_INTERMEDAJO__43"),
+    ("Inmobiliarias y empresariales", "11.3_SEGA_2004_M_48", "324.1_K_ACT_INMOAJO__58"), ("Administración pública", "11.3_C_2004_M_60", "324.1_L_ADM_PUB_AJO__58"),
+    ("Enseñanza", "11.3_CMMR_2004_M_10", "324.1_M_ENSENIANZAJO__27"), ("Salud", "11.3_HR_2004_M_24", "324.1_N_SERVICIOAJO__42")]
+
+
+def sectores_empleo(hoy):
+    """Crecimiento acumulado del año por sector (EMAE) y puestos de trabajo de cada sector (INDEC, cuenta de generación del ingreso)."""
+    desde_a, desde_e = f"{hoy.year - 1}-01-01", f"{hoy.year - 2}-01-01"
+    act, emp = {}, {}
+    for lote in (SECTORES_EMPLEO[:7], SECTORES_EMPLEO[7:]):
+        act.update(series_ds([x[1] for x in lote], desde_a))
+        emp.update(series_ds([x[2] for x in lote], desde_e))
+    ult = min(max(act[x[1]]) for x in SECTORES_EMPLEO)
+    if ult[:4] != str(hoy.year):  # a principios de año: se compara el año anterior completo
+        ult = f"{hoy.year - 1}-12"
+    y = ult[:4]
+    meses = [f"{y}-{m:02d}" for m in range(1, int(ult[5:]) + 1)]
+    q = min(max(emp[x[2]]) for x in SECTORES_EMPLEO)
+    qa = f"{int(q[:4]) - 1}{q[4:]}"
+    filas = []
+    for n, ia, ie in SECTORES_EMPLEO:
+        try:
+            g = (sum(act[ia][m] for m in meses) / sum(act[ia][f"{int(y) - 1}{m[4:]}"] for m in meses) - 1) * 100
+            filas.append({"s": n, "g": round(g, 1), "emp": round(emp[ie][q]), "demp": round((emp[ie][q] / emp[ie][qa] - 1) * 100, 1)})
+        except (KeyError, ZeroDivisionError):
+            pass
+    tot = sum(f["emp"] for f in filas)
+    for f in filas:
+        f["sh"] = round(f["emp"] / tot * 100, 1)
+    return {"hasta": ult, "trimestre": q, "total": tot, "filas": sorted(filas, key=lambda f: -f["g"])}
+
+
 def dia_habil_siguiente(d):
     d += dt.timedelta(days=1)
     while d.weekday() >= 5:
@@ -2038,6 +2075,34 @@ def main():
             aviso("faltan: " + ", ".join(av_x))
     except Exception as e:
         aviso(f"no se pudieron armar los indicadores de actividad adicionales ({e})")
+    try:  # Ventas en comercios (INDEC): supermercados por canal, mayoristas y shoppings
+        v = series_ds(["455.1_CANALES_ONINE_0_M_15_84", "455.1_SALON_VENTTAS_0_M_12_82", "455.1_VENTAS_TOTNTA_0_M_26_88",
+                       "455.1_VENTAS_PREADA_0_M_44_44", "456.1_VENTAS_PREADA_0_M_44_40", "458.1_VENTAS_TOTTES_ABRI_M_33_40"], "2017-01-01")
+        ipc_v = ipc_empalmado()
+        for x in inflacion.get("mensual", []):
+            if x["mes"] not in ipc_v and _mes_ant(x["mes"]) in ipc_v:
+                ipc_v[x["mes"]] = ipc_v[_mes_ant(x["mes"])] * (1 + x["valor"] / 100)
+        on, sa, tot = v["455.1_CANALES_ONINE_0_M_15_84"], v["455.1_SALON_VENTTAS_0_M_12_82"], v["455.1_VENTAS_TOTNTA_0_M_26_88"]
+        ks = sorted(k for k in on if k in sa and k in tot and k in ipc_v)
+        def real12(sr):
+            o = {ks[i]: sum(sr[k] / ipc_v[k] for k in ks[i - 11:i + 1]) for i in range(11, len(ks))}
+            b = o.get("2019-12")
+            return {k: round(x / b * 100, 1) for k, x in o.items()} if b else {}
+        shop0 = desestacionalizar(v["458.1_VENTAS_TOTTES_ABRI_M_33_40"])
+        ks_s = sorted(shop0)  # los shoppings son muy volátiles: promedio móvil de 3 meses
+        shop = {ks_s[i]: sum(shop0[k] for k in ks_s[i - 2:i + 1]) / 3 for i in range(2, len(ks_s))}
+        def idx(sr, base="2023-11"):
+            return [[k, round(sr[k] / sr[base] * 100, 1)] for k in sorted(sr) if k >= "2022-01"] if base in sr else []
+        historicos["ventas"] = {
+            "online_sh": [[k, round(on[k] / tot[k] * 100, 2)] for k in ks],
+            "online_r": sorted(real12(on).items()), "salon_r": sorted(real12(sa).items()),
+            "super": idx(v["455.1_VENTAS_PREADA_0_M_44_44"]), "mayor": idx(v["456.1_VENTAS_PREADA_0_M_44_40"]), "shop": idx(shop)}
+    except Exception as e:
+        aviso(f"no se pudieron armar las ventas en comercios ({e})")
+    try:
+        historicos["sec_empleo"] = sectores_empleo(hoy)
+    except Exception as e:
+        aviso(f"no se pudo armar crecimiento por sector y empleo ({e})")
     try:  # Brasil: reservas internacionales y dólar (Banco Central do Brasil, series SGS 13621 y 1)
         sgs = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.{id}/dados?formato=json&dataInicial={d}"
         conv = lambda f: f[6:10] + "-" + f[3:5] + "-" + f[0:2]
@@ -2506,6 +2571,28 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <div class="gobs" id="encards"></div>
     <div class="chartbox" style="height:420px"><canvas id="c30" aria-label="Precio de la nafta en dólares y del petróleo Brent"></canvas></div>
     <p class="n" id="nene" style="margin:8px 0 0"></p>
+  </section>
+
+  <section data-sec="actividad" class="panel" id="psemp">
+    <div class="phead"><h2 id="psempt">Crecimiento por sector y cuánta gente trabaja en cada uno</h2></div>
+    <div class="gobs" id="psempc"></div>
+    <div class="chartbox" style="height:520px"><canvas id="c43" aria-label="Crecimiento de la actividad por sector y puestos de trabajo de cada sector"></canvas></div>
+    <p class="n" id="psempn" style="margin:8px 0 0"></p>
+  </section>
+
+  <section data-sec="actividad" class="panel" id="pvon">
+    <div class="phead"><h2 id="pvont">Ventas online en supermercados</h2></div>
+    <div class="gobs" id="pvonc"></div>
+    <div class="duo"><div class="chartbox" style="height:300px"><canvas id="c44" aria-label="Participación de las ventas online en supermercados"></canvas></div>
+    <div class="chartbox" style="height:300px"><canvas id="c45" aria-label="Ventas reales de supermercados por canal"></canvas></div></div>
+    <p class="n" id="pvonn" style="margin:8px 0 0"></p>
+  </section>
+
+  <section data-sec="actividad" class="panel" id="pcom2">
+    <div class="phead"><h2 id="pcom2t">Ventas en comercios (reales, desestacionalizadas)</h2></div>
+    <div class="gobs" id="pcom2c"></div>
+    <div class="chartbox" style="height:340px"><canvas id="c46" aria-label="Ventas reales de supermercados, mayoristas y shoppings"></canvas></div>
+    <p class="n" id="pcom2n" style="margin:8px 0 0"></p>
   </section>
 
   <section data-sec="actividad" class="panel" id="psec">
@@ -3619,6 +3706,73 @@ function panelesExtra(){
 }
 setTimeout(panelesExtra,0);
 
+// Crecimiento por sector y empleo
+const etiqSE={id:"etiqSE",afterDatasetsDraw(ch,_,o){const L=o&&o.lista; if(!L) return; const {ctx}=ch, x0=ch.scales.x.getPixelForValue(0); ctx.save(); ctx.font='11px "IBM Plex Mono",monospace'; ctx.textBaseline="middle"; ctx.textAlign="left"; ctx.fillStyle="#ddd";
+  L.forEach((t,i)=>{const pt=ch.getDatasetMeta(0).data[i]; if(pt) ctx.fillText(t,Math.max(pt.x,x0)+6,pt.y);}); ctx.restore();}};
+function sectorEmpleo(){
+  const E=(D.historicos||{}).sec_empleo, panel=document.getElementById("psemp");
+  if(!E||!E.filas||!E.filas.length){panel.style.display="none";return;}
+  const F=E.filas, m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  const col=v=>v>1?"#00d26a":v<-1?"#ff3b3b":"#ffb000", tope=16;
+  const MES=["ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"], hasta=MES[+E.hasta.slice(5)-1], anio=E.hasta.slice(0,4);
+  const tri=["I","II","III","IV"][(+E.trimestre.slice(5)-1)/3|0]+" trimestre "+E.trimestre.slice(0,4);
+  const etiq=F.map(f=>`${f.g>0?"+":""}${fmt(f.g,1)} %${f.g>tope?" ►":""}  ·  ${fmt(f.emp/1000,2)} M de puestos (${fmt(f.sh,1)} %) · empleo ${f.demp>0?"+":""}${fmt(f.demp,1)} % i.a.`);
+  nuevo("c43",{type:"bar",data:{labels:F.map(f=>f.s),datasets:[{data:F.map(f=>Math.max(Math.min(f.g,tope),-tope)),backgroundColor:F.map(f=>col(f.g)),barPercentage:.75}]},
+    options:{indexAxis:"y",responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},etiqSE:{lista:etiq},tooltip:{callbacks:{label:it=>etiq[it.dataIndex]}}},
+      scales:{x:{min:-5,max:45,grid:{color:g},ticks:{color:m,font,stepSize:5,callback:v=>v<=tope?v+" %":""}},y:{grid:{display:false},ticks:{color:"#ddd",font,autoSkip:false}}}},plugins:[etiqSE]});
+  const cat=(fn)=>F.filter(fn).reduce((a,f)=>a+f.sh,0), crec=cat(f=>f.g>1), est=cat(f=>f.g>=-1&&f.g<=1), cae=cat(f=>f.g<-1);
+  const pond=F.reduce((a,f)=>a+f.g*f.sh,0)/100;
+  document.getElementById("psempc").innerHTML=
+    `<div style="--c:#00d26a"><div class="nm">SECTORES QUE CRECEN (+1 %)</div><div class="pc">${fmt(crec,0)} %</div><div class="rg">del empleo</div></div>`+
+    `<div style="--c:#ffb000"><div class="nm">ESTABLES (±1 %)</div><div class="pc">${fmt(est,0)} %</div><div class="rg">del empleo</div></div>`+
+    `<div style="--c:#ff3b3b"><div class="nm">SECTORES QUE CAEN (−1 %)</div><div class="pc">${fmt(cae,0)} %</div><div class="rg">del empleo</div></div>`+
+    `<div style="--c:#3a8ee6"><div class="nm">CRECIMIENTO PONDERADO POR EMPLEO</div><div class="pc">${pond>0?"+":""}${fmt(pond,1)} %</div><div class="rg">el sector del trabajador promedio</div></div>`;
+  document.getElementById("psempt").textContent=`Crecimiento por sector (ene-${hasta} ${anio} vs ${+anio-1}) y cuánta gente trabaja en cada uno`;
+  document.getElementById("psempn").textContent=`Barras: variación de la actividad de cada sector (EMAE del INDEC, serie original), acumulada de enero a ${hasta} contra el mismo período del año anterior; ► indica que la barra está recortada. Al lado: puestos de trabajo totales del sector (asalariados registrados, no registrados y no asalariados) y su variación interanual, de la Cuenta de generación del ingreso del INDEC (${tri}). El crecimiento ponderado por empleo muestra cómo le fue al sector donde trabaja el argentino promedio. No incluye servicio doméstico ni otros servicios comunitarios. Se actualiza solo: actividad cada mes, empleo cada trimestre. Fuente: INDEC vía datos.gob.ar.`;
+}
+setTimeout(sectorEmpleo,0);
+
+// Ventas online y ventas en comercios
+function ventasComercio(){
+  const V=(D.historicos||{}).ventas, m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  if(!V){["pvon","pcom2"].forEach(id=>document.getElementById(id).style.display="none");return;}
+  const sc={x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:10,maxRotation:0}},y:{grid:{color:g},ticks:{color:m,font}}};
+  // online
+  const S=V.online_sh, iU=S.length-1, iMx=S.reduce((a,x,i)=>x[1]>S[a][1]?i:a,0);
+  nuevo("c44",{type:"line",data:{labels:S.map(x=>mesCorto(x[0])),datasets:[{label:"% online",data:S.map(x=>x[1]),borderColor:"#5fd3e6",backgroundColor:"#5fd3e61f",fill:true,borderWidth:2,pointRadius:0,tension:.2}]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},title:{display:true,text:"Participación online (% de las ventas)",color:"#ffb000",font},
+      etiquetas:{lista:[[0,iU,fmt(S[iU][1],1)+"%","#5fd3e6"],[0,iMx,"Máx. "+fmt(S[iMx][1],1)+"%","#ff3b3b"]]},tooltip:{callbacks:{label:it=>fmt(it.raw,2)+" %"}}},
+      scales:{...sc,y:{...sc.y,beginAtZero:true,ticks:{color:m,font,callback:v=>v+" %"}}}},plugins:[etiquetas]});
+  const O=V.online_r, SL=Object.fromEntries(V.salon_r), L2=O.map(x=>x[0]);
+  nuevo("c45",{type:"line",data:{labels:L2.map(mesCorto),datasets:[
+      {label:"Online",data:O.map(x=>x[1]),borderColor:"#5fd3e6",borderWidth:2.4,pointRadius:0,tension:.2},
+      {label:"Salón",data:L2.map(k=>SL[k]??null),borderColor:"#ffb000",borderWidth:2.4,pointRadius:0,tension:.2},
+      {label:"_100",data:L2.map(()=>100),borderColor:"#666",borderDash:[4,4],borderWidth:1,pointRadius:0}]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:m,boxWidth:12,font,filter:it=>!it.text.startsWith("_")}},title:{display:true,text:"Ventas reales por canal (12 meses, 2019 = 100)",color:"#ffb000",font},
+      etiquetas:{lista:[[0,O.length-1,fmt(O[O.length-1][1],0),"#5fd3e6"],[1,O.length-1,fmt(SL[L2[L2.length-1]],0),"#ffb000",false]]},tooltip:{filter:it=>it.datasetIndex<2,callbacks:{label:it=>`${it.dataset.label}: ${fmt(it.raw,1)}`}}},scales:sc},plugins:[etiquetas]});
+  const u=S[iU], ua=S.find(x=>x[0]===`${+u[0].slice(0,4)-1}${u[0].slice(4)}`), pre=S.filter(x=>x[0]>="2019-01"&&x[0]<="2019-12"), p19=pre.reduce((a,x)=>a+x[1],0)/pre.length;
+  document.getElementById("pvonc").innerHTML=
+    `<div style="--c:#5fd3e6"><div class="nm">ONLINE · ${mesCorto(u[0])}</div><div class="pc">${fmt(u[1],1)} %</div><div class="rg">de las ventas de supermercados${ua?` · hace un año ${fmt(ua[1],1)} %`:""}</div></div>`+
+    `<div style="--c:#777"><div class="nm">ANTES DE LA PANDEMIA (2019)</div><div class="pc">${fmt(p19,1)} %</div><div class="rg">máximo ${fmt(S[iMx][1],1)} % en ${mesCorto(S[iMx][0])}</div></div>`+
+    `<div style="--c:#5fd3e6"><div class="nm">ONLINE REAL VS 2019</div><div class="pc">${O[O.length-1][1]>=100?"+":""}${fmt(O[O.length-1][1]-100,0)} %</div><div class="rg">suma de 12 meses</div></div>`+
+    `<div style="--c:#ffb000"><div class="nm">SALÓN REAL VS 2019</div><div class="pc">${SL[L2[L2.length-1]]>=100?"+":""}${fmt(SL[L2[L2.length-1]]-100,0)} %</div><div class="rg">suma de 12 meses</div></div>`;
+  document.getElementById("pvont").textContent=`Ventas online en supermercados · a ${mesCorto(u[0])}`;
+  document.getElementById("pvonn").textContent=`Encuesta de supermercados del INDEC: ventas por canal (salón y canales on-line) a precios corrientes; las ventas reales se deflactan por el IPC y se suman los últimos 12 meses. Solo supermercados: no incluye otros comercios electrónicos como Mercado Libre. Fuente: INDEC vía datos.gob.ar.`;
+  // comercios
+  const C={"Supermercados":[V.super,"#00d26a"],"Mayoristas":[V.mayor,"#3a8ee6"],"Shoppings":[V.shop,"#ff66c4"]};
+  const L=V.super.map(x=>x[0]); const lab=[];
+  const ds=Object.entries(C).map(([n,[sr,c]],i)=>{const mp=Object.fromEntries(sr); lab.push([i,L.length-1,fmt(mp[L[L.length-1]]??sr[sr.length-1][1],0),c]); return {label:n,data:L.map(k=>mp[k]??null),borderColor:c,borderWidth:2.4,pointRadius:0,tension:.2};});
+  nuevo("c46",{type:"line",data:{labels:L.map(mesCorto),datasets:[...ds,{label:"_100",data:L.map(()=>100),borderColor:"#666",borderDash:[4,4],borderWidth:1,pointRadius:0}]},
+    options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},plugins:{legend:{labels:{color:m,boxWidth:12,font,filter:it=>!it.text.startsWith("_")}},etiquetas:{lista:lab,simple:true},
+      lineasVert:{marcas:PRESIDENTES.map(([k,n])=>[L.indexOf(k),n]).filter(x=>x[0]>=0)},tooltip:{filter:it=>it.datasetIndex<3,callbacks:{label:it=>`${it.dataset.label}: ${fmt(it.raw,1)}`}}},scales:sc},plugins:[etiquetas,lineasVert]});
+  const ult=k=>{const sr=C[k][0], x=sr[sr.length-1], a=sr.find(y=>y[0]===`${+x[0].slice(0,4)-1}${x[0].slice(4)}`); return [x,a];};
+  document.getElementById("pcom2c").innerHTML=Object.keys(C).map(k=>{const [x,a]=ult(k); const d=a?(x[1]/a[1]-1)*100:null;
+    return `<div style="--c:${C[k][1]}"><div class="nm">${k.toUpperCase()} · ${mesCorto(x[0])}</div><div class="pc">${fmt(x[1],1)}</div><div class="rg">nov-23 = 100${d!=null?` · ${d>0?"+":""}${fmt(d,1)} % i.a.`:""}</div></div>`;}).join("");
+  document.getElementById("pcom2t").textContent=`Ventas en comercios: supermercados, mayoristas y shoppings (reales, desestacionalizadas, nov-23 = 100)`;
+  document.getElementById("pcom2n").textContent=`Ventas a precios constantes de las encuestas del INDEC. Supermercados y autoservicios mayoristas: serie desestacionalizada oficial; centros de compras (shoppings): desestacionalizada por el tablero y promediada en 3 meses, porque es muy volátil. Base 100 en noviembre de 2023. Fuente: INDEC vía datos.gob.ar.`;
+}
+setTimeout(ventasComercio,0);
+
 // Oro del BCRA
 let c26;
 function oro(){
@@ -3786,7 +3940,7 @@ function servicios(){
   document.getElementById("nserv").textContent=`Último: USD ${fmt(u[i],0)} M en los 12 meses a ${mesCorto(u[0])}${a?`, ${fmt((u[i]/a[i]-1)*100,0)} % más que un año antes`:""}. Son los dólares que ingresan por el mercado de cambios por cada servicio (balance cambiario del BCRA), por eso pueden diferir de las estadísticas del INDEC. Fuente: BCRA vía datos.gob.ar.`;
 }
 document.querySelectorAll("[data-sv]").forEach(b=>b.onclick=()=>{svVista=b.dataset.sv;document.querySelectorAll("[data-sv]").forEach(x=>x.setAttribute("aria-pressed",x===b));servicios();});
-setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();jubilacion();panelesExtra();salarioMandatos();energia();relativos();},0);
+setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();jubilacion();panelesExtra();sectorEmpleo();ventasComercio();salarioMandatos();energia();relativos();},0);
 
 // Semáforo de actividad
 function semaforoTabla(){
@@ -4039,7 +4193,7 @@ function render(){
 
 }
 document.querySelectorAll("[data-mode]").forEach(b=>b.onclick=()=>{mode=b.dataset.mode;document.querySelectorAll("[data-mode]").forEach(x=>x.setAttribute("aria-pressed",x===b));render();});
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();jubilacion();panelesExtra();salarioMandatos();energia();relativos();inflacion();});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();jubilacion();panelesExtra();sectorEmpleo();ventasComercio();salarioMandatos();energia();relativos();inflacion();});
 render();
 function avisos(){const A=D.avisos||[], el=document.getElementById("avisos"); el.innerHTML=A.length?`<section class="panel" style="border-color:var(--bad)"><div class="k" style="color:var(--bad)">Avisos de la última actualización</div><ul class="n" style="margin:6px 0 0;padding-left:18px">${A.map(a=>`<li>${a.replace(/</g,"&lt;")}</li>`).join("")}</ul></section>`:"";}
 avisos();
@@ -4072,7 +4226,7 @@ document.addEventListener("keydown",e=>{ if(e.target.tagName==="SELECT"||e.targe
 })();
 (function reloj(){const el=document.getElementById("clk"); const f=()=>{el.textContent=new Date().toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})+" ART";}; f(); setInterval(f,30000);})();
 // Redibuja cuando termina de cargar la tipografía, para que las etiquetas midan bien
-if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();jubilacion();panelesExtra();salarioMandatos();energia();relativos();inflacion();});
+if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();jubilacion();panelesExtra();sectorEmpleo();ventasComercio();salarioMandatos();energia();relativos();inflacion();});
 // Recarga la página cada 10 minutos para tomar la última versión generada
 // Recarga salteando la caché del navegador (agrega ?t=… al link)
 const recargar=()=>location.replace(location.pathname+"?t="+Date.now()+location.hash);

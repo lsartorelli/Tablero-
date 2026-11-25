@@ -155,5 +155,15 @@
   "icg_manual": {
     "_ayuda": "Índice de Confianza en el Gobierno de la UTDT para los meses que ya publicó la universidad pero datos.gob.ar todavía no cargó (suele tardar semanas). Cuando la serie oficial lo trae, este dato se ignora solo.",
     "2026-11": 2.04
+  },
+  "jubilacion": {
+    "_ayuda": "haber_manual: haber mínimo de los meses que ANSES ya anunció pero datos.gob.ar todavía no cargó (se ignora solo cuando llega). bono: monto del bono extraordinario desde cada mes (sigue vigente hasta que cambie).",
+    "haber_manual": {
+      "2026-11": 444158.46
+    },
+    "bono": {
+      "2023-12": 55000,
+      "2024-03": 70000
+    }
   }
 }
