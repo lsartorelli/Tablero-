@@ -922,6 +922,41 @@ def rendimientos_anio(hoy, inflacion, cfg_r):
     return {"desde": ini, "activos": sorted(out, key=lambda x: x["rend"]), "inflacion": infl}, avisos_r
 
 
+def serie_larga(var_id, desde, hasta):
+    """Serie diaria del BCRA en tramos (la API devuelve hasta 3000 datos por consulta)."""
+    out, d = [], dt.date.fromisoformat(desde)
+    fin = dt.date.fromisoformat(hasta)
+    while d <= fin:
+        h = min(d + dt.timedelta(days=2900), fin)
+        j = get_json(f"https://api.bcra.gob.ar/estadisticas/v4.0/Monetarias/{var_id}?desde={d.isoformat()}&hasta={h.isoformat()}&limit=3000")
+        out += [(x["fecha"], float(x["valor"])) for x in j["results"][0]["detalle"]]
+        d = h + dt.timedelta(days=1)
+    return sorted(out)
+
+
+def base_amplia_real(hoy, ipc_m):
+    """Base monetaria amplia (base + LEBAC/NOBAC + LELIQ + pases pasivos; aparte, con LEFI) en términos reales,
+    promedio mensual, índice noviembre 2023 = 100."""
+    componentes = {"base": 15, "lebac": 156, "leliq": 155, "pases": 152, "lefi": 196}
+    mens, ult_dia = {}, None
+    for k, v in componentes.items():
+        sl = serie_larga(v, "2003-01-01", hoy.isoformat())
+        if k == "base" and sl:
+            ult_dia = sl[-1][0]
+        mens[k] = promedio_mensual(sl)
+    meses = sorted(m for m in mens["base"] if m in ipc_m)
+    amplia, con_lefi = {}, {}
+    for m in meses:
+        a = sum(mens[k].get(m, 0) for k in ("base", "lebac", "leliq", "pases"))
+        amplia[m] = a / ipc_m[m]
+        if mens["lefi"].get(m):
+            con_lefi[m] = (a + mens["lefi"][m]) / ipc_m[m]
+    b = amplia["2023-11"]
+    return {"amplia": [[m, round(v / b * 100, 1)] for m, v in amplia.items()],
+            "lefi": [[m, round(v / b * 100, 1)] for m, v in con_lefi.items()],
+            "ultimo_dia": ult_dia}
+
+
 def dia_habil_siguiente(d):
     d += dt.timedelta(days=1)
     while d.weekday() >= 5:
@@ -1573,6 +1608,28 @@ def main():
                 d += dt.timedelta(days=1)
             historicos["itcrm"] = {"serie": [[f, round(v, 2)] for f, v in d_itcrm], "estimado": est,
                                    "a3500": round(a_d[max(a_d)], 2), "a3500_fecha": max(a_d)}
+            # Reexpresa el gráfico de dólar oficial y CCL en pesos de HOY (no del último mes publicado) y lo
+            # completa hasta el mes en curso con el ITCRM diario (oficial + estimado)
+            diario = d_itcrm + [tuple(x) for x in est]
+            itc_hoy, a_hoy = diario[-1][1], a_d[max(a_d)]
+            fac2 = a_hoy / itc_hoy
+            itc2 = dict(itc)
+            for k, v in promedio_mensual(diario).items():
+                if k > base:
+                    itc2[k] = v
+            ccl_b = promedio_mensual((f, v[1]) for f, v in DOLARES_BONOS.items()) if DOLARES_BONOS else {}
+            nueva = []
+            for m in sorted(k for k in itc2 if k >= "2001-12"):
+                of = itc2[m] * fac2
+                cm = ccl_b.get(m) or ccl_m.get(m)
+                if cm and m in a_m:
+                    cc = of * cm / a_m[m]
+                elif m < "2011-11":
+                    cc = of
+                else:
+                    cc = None
+                nueva.append([m, round(of, 1), round(cc, 1) if cc else None])
+            historicos["tcr"] = {"base": max(a_d), "serie": nueva}
         except Exception as e:
             aviso(f"no se pudo armar el ITCRM diario ({e})")
         # Dólar MEP real ajustado por el tipo de cambio real bilateral con Brasil
@@ -1828,6 +1885,19 @@ def main():
         historicos["energia"] = {"brent": sorted(brent.items()), "nafta": nafta, "mep": {k: round(v, 2) for k, v in mep_m.items()}}
     except Exception as e:
         aviso(f"no se pudieron traer el Brent o los precios de la nafta ({e})")
+    try:  # Base monetaria amplia en términos reales (IPC empalmado, extendido con el último dato mensual)
+        ipc_b = ipc_empalmado()
+        for x in inflacion.get("mensual", []):
+            if x["mes"] not in ipc_b and _mes_ant(x["mes"]) in ipc_b:
+                ipc_b[x["mes"]] = ipc_b[_mes_ant(x["mes"])] * (1 + x["valor"] / 100)
+        m_act, ult_ipc = hoy.strftime("%Y-%m"), max(ipc_b)
+        while ult_ipc < m_act:  # mes en curso: se proyecta con la última inflación publicada
+            sig = _mes_sig(ult_ipc)
+            ipc_b[sig] = ipc_b[ult_ipc] * (1 + (inflacion.get("mensual") or [{"valor": 2}])[-1]["valor"] / 100)
+            ult_ipc = sig
+        historicos["bma"] = base_amplia_real(hoy, ipc_b)
+    except Exception as e:
+        aviso(f"no se pudo armar la base monetaria amplia real ({e})")
     try:  # Brasil: reservas internacionales y dólar (Banco Central do Brasil, series SGS 13621 y 1)
         sgs = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.{id}/dados?formato=json&dataInicial={d}"
         conv = lambda f: f[6:10] + "-" + f[3:5] + "-" + f[0:2]
@@ -2419,6 +2489,12 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <p class="n" id="ntcr" style="margin:8px 0 0"></p>
   </section>
 
+  <section data-sec="reservas" class="panel" id="pbma">
+    <div class="phead"><h2>Base monetaria amplia en términos reales (nov-23 = 100)</h2></div>
+    <div class="chartbox" style="height:380px"><canvas id="c35" aria-label="Base monetaria amplia deflactada por inflación desde 2003"></canvas></div>
+    <p class="n" id="nbma" style="margin:8px 0 0"></p>
+  </section>
+
   <section data-sec="reservas" class="panel" id="poro">
     <div class="phead"><h2>Oro en el Banco Central (USD millones)</h2></div>
     <div class="chartbox" style="height:340px"><canvas id="c26" aria-label="Valor diario del oro en las reservas del BCRA"></canvas></div>
@@ -2827,7 +2903,7 @@ function historicos(){
           tooltip:{callbacks:{label:it=>it.raw==null?null:`${it.dataset.label}: $ ${fmt(it.raw,0)}`}}},
         scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:14,maxRotation:0}},y:{grid:{color:g},ticks:{color:m,font,callback:v=>"$ "+fmt(v)}}}},plugins:[lineasVert]});
     const u=S[S.length-1];
-    document.getElementById("tcrt").textContent=`Dólar oficial y CCL ajustados por ITCRM (base ${mesCorto(T.base)})`;
+    document.getElementById("tcrt").textContent=`Dólar oficial y CCL ajustados por ITCRM (${T.base.length>7?"en pesos de hoy, "+dmy(T.base):"base "+mesCorto(T.base)})`;
     document.getElementById("ntcr").textContent=`Cuánto valdría hoy cada dólar del pasado si se mantuviera el mismo tipo de cambio real multilateral. Último: oficial $ ${fmt(u[1],0)}, CCL $ ${u[2]?fmt(u[2],0):"s/d"}. Promedio desde 2001: oficial $ ${fmt(pO,0)}, CCL $ ${fmt(pC,0)}. Mínimo de 2017: $ ${fmt(min17,0)}. El CCL coincide con el oficial antes del cepo de nov-2011; entre nov-2011 y dic-2012 no hay datos. Fuentes: BCRA (ITCRM, A3500), ArgentinaDatos (CCL).`;
   } else document.getElementById("ptcr").style.display="none";
   const M=H.merval;
@@ -3253,6 +3329,28 @@ const etiquetasBarra={id:"etiquetasBarra",afterDatasetsDraw(ch,_,o){const L=ch.o
 document.querySelectorAll("[data-bm]").forEach(b=>b.onclick=()=>{bmVista=b.dataset.bm;document.querySelectorAll("[data-bm]").forEach(x=>x.setAttribute("aria-pressed",x===b));bigmac();});
 setTimeout(bigmac,0);
 
+// Base monetaria amplia real
+let c35;
+function bmaReal(){
+  const B=(D.historicos||{}).bma, panel=document.getElementById("pbma");
+  if(!B||!B.amplia||!B.amplia.length){panel.style.display="none";return;}
+  const L=B.amplia.map(x=>x[0]), V=B.amplia.map(x=>x[1]), LF=Object.fromEntries(B.lefi), m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  const iU=V.length-1, iMx=V.indexOf(Math.max(...V)), i23=L.indexOf("2023-11");
+  c35?.destroy();
+  c35=new Chart(document.getElementById("c35"),{type:"line",data:{labels:L.map(mesCorto),datasets:[
+      {label:"Base monetaria amplia real",data:V,borderColor:"#3a8ee6",borderWidth:2.2,pointRadius:0,tension:.15},
+      {label:"Incluyendo LEFI",data:L.map(k=>LF[k]??null),borderColor:"#5fd3e6",borderDash:[4,3],borderWidth:1.8,pointRadius:0,tension:.15},
+      {label:"Nov-23 = 100",data:L.map(()=>100),borderColor:"#ffb000",borderDash:[6,4],borderWidth:1.2,pointRadius:0}]},
+    options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
+      plugins:{legend:{labels:{color:m,boxWidth:12,font}},lineasVert:{marcas:PRESIDENTES.map(([k,n])=>[L.indexOf(k),n])},
+        etiquetas:{lista:[[0,iU,`${mesCorto(L[iU])}: ${fmt(V[iU],0)}`,"#ffffff"],[0,iMx,`Máx. ${fmt(V[iMx],0)}`,"#3a8ee6"]]},
+        tooltip:{filter:it=>it.datasetIndex<2&&it.raw!=null,callbacks:{label:it=>`${it.dataset.label}: ${fmt(it.raw,1)}`}}},
+      scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:14,maxRotation:0}},y:{beginAtZero:true,grid:{color:g},ticks:{color:m,font}}}},plugins:[etiquetas,lineasVert]});
+  const a=V[iU-12]!=null?V[iU-12]:null;
+  document.getElementById("nbma").textContent=`Base monetaria + LEBAC/NOBAC + LELIQ + pases pasivos del BCRA, promedio mensual, deflactada por inflación (IPC del INDEC; IPC de San Luis entre 2007 y 2016; el mes en curso, con la última inflación publicada). Índice noviembre 2023 = 100. Último: ${fmt(V[iU],1)} en ${mesCorto(L[iU])} (mes en curso, promedio hasta ${B.ultimo_dia?dmy(B.ultimo_dia):"hoy"})${a!=null?`; hace un año: ${fmt(a,1)}`:""}. La línea punteada suma las LEFI (2024-2025). Se actualiza con cada dato diario del BCRA. Fuente: BCRA, API de estadísticas monetarias.`;
+}
+setTimeout(bmaReal,0);
+
 // Oro del BCRA
 let c26;
 function oro(){
@@ -3420,7 +3518,7 @@ function servicios(){
   document.getElementById("nserv").textContent=`Último: USD ${fmt(u[i],0)} M en los 12 meses a ${mesCorto(u[0])}${a?`, ${fmt((u[i]/a[i]-1)*100,0)} % más que un año antes`:""}. Son los dólares que ingresan por el mercado de cambios por cada servicio (balance cambiario del BCRA), por eso pueden diferir de las estadísticas del INDEC. Fuente: BCRA vía datos.gob.ar.`;
 }
 document.querySelectorAll("[data-sv]").forEach(b=>b.onclick=()=>{svVista=b.dataset.sv;document.querySelectorAll("[data-sv]").forEach(x=>x.setAttribute("aria-pressed",x===b));servicios();});
-setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();salarioMandatos();energia();relativos();},0);
+setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();salarioMandatos();energia();relativos();},0);
 
 // Semáforo de actividad
 function semaforoTabla(){
@@ -3673,7 +3771,7 @@ function render(){
 
 }
 document.querySelectorAll("[data-mode]").forEach(b=>b.onclick=()=>{mode=b.dataset.mode;document.querySelectorAll("[data-mode]").forEach(x=>x.setAttribute("aria-pressed",x===b));render();});
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();salarioMandatos();energia();relativos();inflacion();});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();salarioMandatos();energia();relativos();inflacion();});
 render();
 function avisos(){const A=D.avisos||[], el=document.getElementById("avisos"); el.innerHTML=A.length?`<section class="panel" style="border-color:var(--bad)"><div class="k" style="color:var(--bad)">Avisos de la última actualización</div><ul class="n" style="margin:6px 0 0;padding-left:18px">${A.map(a=>`<li>${a.replace(/</g,"&lt;")}</li>`).join("")}</ul></section>`:"";}
 avisos();
@@ -3706,7 +3804,7 @@ document.addEventListener("keydown",e=>{ if(e.target.tagName==="SELECT"||e.targe
 })();
 (function reloj(){const el=document.getElementById("clk"); const f=()=>{el.textContent=new Date().toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})+" ART";}; f(); setInterval(f,30000);})();
 // Redibuja cuando termina de cargar la tipografía, para que las etiquetas midan bien
-if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();salarioMandatos();energia();relativos();inflacion();});
+if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();salarioMandatos();energia();relativos();inflacion();});
 // Recarga la página cada 10 minutos para tomar la última versión generada
 // Recarga salteando la caché del navegador (agrega ?t=… al link)
 const recargar=()=>location.replace(location.pathname+"?t="+Date.now()+location.hash);
