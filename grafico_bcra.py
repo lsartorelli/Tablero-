@@ -170,6 +170,12 @@ CONFIG_DEFECTO = {
                   "todavía no cargó (suele tardar semanas). Cuando la serie oficial lo trae, este dato se ignora solo.",
         "2026-11": 2.04
     },
+    "jubilacion": {
+        "_ayuda": "haber_manual: haber mínimo de los meses que ANSES ya anunció pero datos.gob.ar todavía no cargó (se ignora "
+                  "solo cuando llega). bono: monto del bono extraordinario desde cada mes (sigue vigente hasta que cambie).",
+        "haber_manual": {"2026-11": 444158.46},
+        "bono": {"2023-12": 55000, "2024-03": 70000}
+    },
     "reeleccion": {
         "_ayuda": "Riesgo país esperado si Milei es reelecto (riesgo_gana) y si pierde (riesgo_pierde). "
                   "La probabilidad implícita se interpola entre ambos. Valores calibrados con la serie de FMyA.",
@@ -849,7 +855,8 @@ def rendimientos_anio(hoy, inflacion, cfg_r):
             else:
                 agregar(nombre, b0[1], y[-1][1], "acciones")
         except Exception as e:
-            avisos_r.append(f"{nombre} ({e})")
+            if t != "^MERV":  # la serie del Merval de Yahoo falla seguido: se omite sin avisar
+                avisos_r.append(f"{nombre} ({e})")
     # Bonos en dólares: precio en pesos + cupones y amortizaciones cobrados (pasados a pesos al MEP del día de pago)
     for t in ("GD30", "AL30"):
         try:
@@ -1898,6 +1905,35 @@ def main():
         historicos["bma"] = base_amplia_real(hoy, ipc_b)
     except Exception as e:
         aviso(f"no se pudo armar la base monetaria amplia real ({e})")
+    try:  # Jubilación mínima en términos reales (haber mínimo y bono, en pesos del último mes)
+        jcfg = cfg.get("jubilacion", CONFIG_DEFECTO["jubilacion"])
+        hab = {r[0][:7]: r[1] for r in get_json(SERIES_URL.format(ids="58.1_MP_0_M_24") + "&start_date=2006-01-01")["data"] if r[1]}
+        for mes, v in jcfg.get("haber_manual", {}).items():
+            if mes not in hab and v:
+                hab[mes] = float(v)
+        ipc_j = ipc_empalmado()
+        for x in inflacion.get("mensual", []):
+            if x["mes"] not in ipc_j and _mes_ant(x["mes"]) in ipc_j:
+                ipc_j[x["mes"]] = ipc_j[_mes_ant(x["mes"])] * (1 + x["valor"] / 100)
+        ult_h = max(hab)
+        while max(ipc_j) < ult_h:  # mes sin inflación publicada: se estima con la última
+            k = max(ipc_j)
+            ipc_j[_mes_sig(k)] = ipc_j[k] * (1 + (inflacion.get("mensual") or [{"valor": 2}])[-1]["valor"] / 100)
+        tramos = sorted(jcfg.get("bono", {}).items())
+        def bono_de(m):
+            b = None
+            for desde_b, monto in tramos:
+                if m >= desde_b:
+                    b = monto
+            return b
+        meses_j = sorted(m for m in hab if m >= f"{hoy.year - 20}-{hoy.month:02d}" and m in ipc_j)
+        base_j = meses_j[-1]
+        historicos["jubilacion"] = {"base": base_j, "ipc_estimado": base_j > max(x["mes"] for x in inflacion.get("mensual", [{"mes": "0"}])),
+                                    "serie": [[m, round(hab[m] * ipc_j[base_j] / ipc_j[m]),
+                                               round((hab[m] + bono_de(m)) * ipc_j[base_j] / ipc_j[m]) if bono_de(m) else None,
+                                               round(hab[m], 2), bono_de(m)] for m in meses_j]}
+    except Exception as e:
+        aviso(f"no se pudo armar la jubilación mínima real ({e})")
     try:  # Brasil: reservas internacionales y dólar (Banco Central do Brasil, series SGS 13621 y 1)
         sgs = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.{id}/dados?formato=json&dataInicial={d}"
         conv = lambda f: f[6:10] + "-" + f[3:5] + "-" + f[0:2]
@@ -2572,6 +2608,13 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
     <p class="n" id="nrel" style="margin:8px 0 0"></p>
   </section>
 
+  <section data-sec="ipc" class="panel" id="pjub">
+    <div class="phead"><h2 id="jubt">Jubilación mínima en términos reales</h2></div>
+    <div class="gobs" id="jubcards"></div>
+    <div class="chartbox" style="height:400px"><canvas id="c36" aria-label="Haber mínimo jubilatorio ajustado por inflación en los últimos 20 años"></canvas></div>
+    <p class="n" id="njub" style="margin:8px 0 0"></p>
+  </section>
+
   <section data-sec="ipc" class="panel" id="psm">
     <div class="phead"><h2>Salario registrado ajustado por inflación por mandato (100 = mes previo a la asunción)</h2></div>
     <div class="gobs" id="smcards"></div>
@@ -3009,6 +3052,34 @@ function relativos(){
   document.getElementById("nrel").textContent=`Cuánto más (rojo) o menos (verde) paga por mes un hogar del GBA que gasta $ ${fmt(R.gasto,0)} y consume lo mismo que en ${mesCorto(R.base)}, porque el precio de cada rubro subió más o menos que la inflación general. Se calcula con el peso del rubro en la canasta del IPC del GBA, actualizado al mes base, y su variación de precio real. El mes base y el gasto del hogar se cambian en config.json. Fuente: INDEC, IPC por aperturas y ponderaciones.`;
 }
 setTimeout(relativos,0);
+
+// Jubilación mínima real
+let c36;
+function jubilacion(){
+  const J=(D.historicos||{}).jubilacion, panel=document.getElementById("pjub");
+  if(!J||!J.serie.length){panel.style.display="none";return;}
+  const S=J.serie, L=S.map(x=>x[0]), SB=S.map(x=>x[1]), CB=S.map(x=>x[2]), m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  const iU=S.length-1, iMx=SB.indexOf(Math.max(...SB)), iMn=SB.indexOf(Math.min(...SB)), i23=L.indexOf("2023-11");
+  const pc=(a,b)=>`${a>=b?"+":""}${fmt((a/b-1)*100,0)} %`, u=S[iU];
+  const lab=[[0,iMx,`Máx. $ ${fmt(SB[iMx],0)} (${mesCorto(L[iMx])})`,"#ff3b3b"],[0,iMn,`Mín. $ ${fmt(SB[iMn],0)} (${mesCorto(L[iMn])})`,"#ff3b3b",false],[0,iU,"$ "+fmt(SB[iU],0),"#ffb000",false]];
+  if(CB[iU]) lab.push([1,iU,"$ "+fmt(CB[iU],0),"#00d26a"]);
+  c36?.destroy();
+  c36=new Chart(document.getElementById("c36"),{type:"line",data:{labels:L.map(mesCorto),datasets:[
+      {label:"Haber mínimo (sin bono)",data:SB,borderColor:"#ffb000",borderWidth:2.4,pointRadius:0,tension:.1},
+      {label:"Haber mínimo + bono",data:CB,borderColor:"#00d26a",borderWidth:2.4,pointRadius:0,tension:.1}]},
+    options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
+      plugins:{legend:{labels:{color:m,boxWidth:12,font}},lineasVert:{marcas:PRESIDENTES.map(([k,n])=>[L.indexOf(k),n]).filter(x=>x[0]>=0)},etiquetas:{lista:lab},
+        tooltip:{callbacks:{label:it=>it.raw==null?null:`${it.dataset.label}: $ ${fmt(it.raw,0)} (nominal: $ ${fmt(S[it.dataIndex][3]+(it.datasetIndex===1?S[it.dataIndex][4]:0),0)})`}}},
+      scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:12,maxRotation:0}},y:{beginAtZero:true,suggestedMax:Math.max(...SB)*1.12,grid:{color:g},ticks:{color:m,font,callback:v=>"$ "+fmt(v,0)}}}},plugins:[etiquetas,lineasVert]});
+  document.getElementById("jubcards").innerHTML=
+    `<div style="--c:#ffb000"><div class="nm">HABER MÍNIMO · ${mesCorto(u[0])}</div><div class="pc">$ ${fmt(u[3],0)}</div><div class="rg">sin bono</div></div>`+
+    `<div style="--c:#00d26a"><div class="nm">CON BONO</div><div class="pc">$ ${fmt(u[3]+(u[4]||0),0)}</div><div class="rg">bono de $ ${fmt(u[4]||0,0)}${u[4]?" (congelado)":""}</div></div>`+
+    (i23>=0?`<div style="--c:${SB[iU]>=SB[i23]?"#00d26a":"#ff3b3b"}"><div class="nm">REAL VS NOV-23 (SIN BONO)</div><div class="pc">${pc(SB[iU],SB[i23])}</div><div class="rg">nov-23: $ ${fmt(SB[i23],0)} de hoy</div></div>`:"")+
+    `<div style="--c:#ff3b3b"><div class="nm">REAL VS MÁXIMO</div><div class="pc">${pc(SB[iU],SB[iMx])}</div><div class="rg">máximo en ${mesCorto(L[iMx])}: $ ${fmt(SB[iMx],0)}</div></div>`;
+  document.getElementById("jubt").textContent=`Jubilación mínima en términos reales · últimos 20 años (en pesos de ${mesCorto(J.base)})`;
+  document.getElementById("njub").textContent=`Haber mínimo jubilatorio de cada mes llevado a pesos de ${mesCorto(J.base)} con la inflación (IPC del INDEC; IPC de San Luis entre 2007 y 2016)${J.ipc_estimado?"; la inflación del último mes es estimada con la anterior":""}. La línea verde suma el bono extraordinario (desde dic-23; los bonos de 2022-2023 no están incluidos). Hasta 2024 la movilidad era trimestral o semestral, por eso la forma de serrucho. Se actualiza sola con el haber oficial; el haber de un mes ya anunciado pero no cargado y el monto del bono se ajustan en config.json, bloque "jubilacion". Fuentes: ANSES / Secretaría de Seguridad Social vía datos.gob.ar, INDEC.`;
+}
+setTimeout(jubilacion,0);
 
 // Salario real por mandato
 let c29;
@@ -3518,7 +3589,7 @@ function servicios(){
   document.getElementById("nserv").textContent=`Último: USD ${fmt(u[i],0)} M en los 12 meses a ${mesCorto(u[0])}${a?`, ${fmt((u[i]/a[i]-1)*100,0)} % más que un año antes`:""}. Son los dólares que ingresan por el mercado de cambios por cada servicio (balance cambiario del BCRA), por eso pueden diferir de las estadísticas del INDEC. Fuente: BCRA vía datos.gob.ar.`;
 }
 document.querySelectorAll("[data-sv]").forEach(b=>b.onclick=()=>{svVista=b.dataset.sv;document.querySelectorAll("[data-sv]").forEach(x=>x.setAttribute("aria-pressed",x===b));servicios();});
-setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();salarioMandatos();energia();relativos();},0);
+setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();jubilacion();salarioMandatos();energia();relativos();},0);
 
 // Semáforo de actividad
 function semaforoTabla(){
@@ -3771,7 +3842,7 @@ function render(){
 
 }
 document.querySelectorAll("[data-mode]").forEach(b=>b.onclick=()=>{mode=b.dataset.mode;document.querySelectorAll("[data-mode]").forEach(x=>x.setAttribute("aria-pressed",x===b));render();});
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();salarioMandatos();energia();relativos();inflacion();});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();jubilacion();salarioMandatos();energia();relativos();inflacion();});
 render();
 function avisos(){const A=D.avisos||[], el=document.getElementById("avisos"); el.innerHTML=A.length?`<section class="panel" style="border-color:var(--bad)"><div class="k" style="color:var(--bad)">Avisos de la última actualización</div><ul class="n" style="margin:6px 0 0;padding-left:18px">${A.map(a=>`<li>${a.replace(/</g,"&lt;")}</li>`).join("")}</ul></section>`:"";}
 avisos();
@@ -3804,7 +3875,7 @@ document.addEventListener("keydown",e=>{ if(e.target.tagName==="SELECT"||e.targe
 })();
 (function reloj(){const el=document.getElementById("clk"); const f=()=>{el.textContent=new Date().toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})+" ART";}; f(); setInterval(f,30000);})();
 // Redibuja cuando termina de cargar la tipografía, para que las etiquetas midan bien
-if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();salarioMandatos();energia();relativos();inflacion();});
+if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();jubilacion();salarioMandatos();energia();relativos();inflacion();});
 // Recarga la página cada 10 minutos para tomar la última versión generada
 // Recarga salteando la caché del navegador (agrega ?t=… al link)
 const recargar=()=>location.replace(location.pathname+"?t="+Date.now()+location.hash);
