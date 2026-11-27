@@ -72,7 +72,7 @@ CONFIG_DEFECTO = {
         "activos": [
             {"nombre": "GD38", "fuente": "bono", "simbolo": "GD38", "precio": "limpio_ccl", "precio_0": 85.59, "precio_100": 45.0},
             {"nombre": "GD35", "fuente": "bono", "simbolo": "GD35", "precio": "limpio_ccl", "precio_0": 83.08, "precio_100": 45.0},
-            {"nombre": "Merval", "fuente": "merval_usd", "simbolo": "^MERV", "escala": 0.03144, "precio_0": 82, "precio_100": 20}
+            {"nombre": "Merval", "fuente": "merval_usd", "simbolo": "MSCI Merval", "escala": 1, "precio_0": 82, "precio_100": 20}
         ]
     },
     "preocupaciones": {
@@ -844,7 +844,12 @@ def rendimientos_anio(hoy, inflacion, cfg_r):
         r = get_json(f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(t)}?range=2y&interval=1d")["chart"]["result"][0]
         return sorted((dt.datetime.fromtimestamp(a, dt.timezone.utc).date().isoformat(), c)
                       for a, c in zip(r["timestamp"], r["indicators"]["quote"][0]["close"]) if c)
-    for nombre, t, en_usd in (("Merval", "^MERV", False), ("S&P 500 (SPY)", "SPY", True), ("Bitcoin", "BTC-USD", True)):
+    try:
+        md = sorted(merval_datos(hoy)[0].items())
+        agregar("Merval", base(md)[1], md[-1][1], "acciones")
+    except Exception as e:
+        avisos_r.append(f"Merval ({e})")
+    for nombre, t, en_usd in (("S&P 500 (SPY)", "SPY", True), ("Bitcoin", "BTC-USD", True)):
         try:
             y = yahoo(t)
             b0 = base(y)
@@ -1098,6 +1103,83 @@ def sectores_empleo(hoy):
     return {"hasta": ult, "trimestre": q, "total": tot, "filas": sorted(filas, key=lambda f: -f["g"])}
 
 
+# ---------- Merval ----------
+# El 16/10/2026 el S&P Merval fue reemplazado por el MSCI Merval, con base 100.000 ese día (el S&P Merval
+# cerró en 2.843.310,56). Para la serie larga se empalma: MSCI Merval x factor = puntos del S&P Merval.
+MERVAL_FACTOR = 2843310.56 / 100000
+MERVAL_CAMBIO = "2026-10-16"
+MERVAL_2001_2005 = {"2001-12": 295.0, "2002-01": 439.0, "2002-02": 398.0, "2002-03": 436.0, "2002-04": 388.0, "2002-05": 318.0, "2002-06": 351.0, "2002-07": 359.0, "2002-08": 375.0, "2002-09": 395.0, "2002-10": 435.0, "2002-11": 498.0, "2002-12": 525.0, "2003-01": 550.0, "2003-02": 594.0, "2003-03": 567.0, "2003-04": 636.0, "2003-05": 678.0, "2003-06": 766.0, "2003-07": 755.0, "2003-08": 713.0, "2003-09": 828.0, "2003-10": 930.0, "2003-11": 997.0, "2003-12": 1072.0, "2004-01": 1141.0, "2004-02": 1183.0, "2004-03": 1202.0, "2004-04": 1078.0, "2004-05": 953.0, "2004-06": 946.0, "2004-07": 966.0, "2004-08": 952.0, "2004-09": 1143.0, "2004-10": 1287.0, "2004-11": 1213.0, "2004-12": 1375.0, "2005-01": 1374.0, "2005-02": 1559.0, "2005-03": 1400.0, "2005-04": 1348.0, "2005-05": 1486.0, "2005-06": 1367.0, "2005-07": 1508.0}  # cierres mensuales anteriores a la serie de Ámbito
+MERVAL_ARCHIVO = os.path.join(BASE, "historial_merval.json")
+
+
+def _rava_merval(fecha):
+    """Últimos ~10 cierres del Merval (MSCI Merval desde el 16/10/2026) desde la página histórica de Rava."""
+    import html as _h, re as _re
+    s_ = get_bytes(f"https://www.rava.com/cotizaciones/historico/merval/{fecha.year}/{fecha.month:02d}/{fecha.day:02d}/").decode("utf-8", "ignore")
+    t = _re.sub(r"\s+", " ", _h.unescape(_re.sub(r"<[^>]+>", " ", _re.sub(r"<script.*?</script>|<style.*?</style>", " ", s_, flags=_re.S))))
+    t = t[t.find("Ultimos dias"):][:1500]
+    out = {}
+    for d_, m_, y_, v in _re.findall(r"(\d{2})/(\d{2})/(\d{4}) ([\d\.]+)(?:,\d+)? ", t):
+        out[f"{y_}-{m_}-{d_}"] = float(v.replace(".", ""))
+    return out
+
+
+def merval_diario(hoy):
+    """Cierres diarios del Merval en puntos del S&P Merval (desde ago-2005), empalmando el MSCI Merval."""
+    try:
+        with open(MERVAL_ARCHIVO, encoding="utf-8") as f:
+            nuevo = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        nuevo = {}
+    # completa el MSCI Merval desde el cambio de índice hasta hoy, de a tramos (cada página trae ~10 ruedas)
+    d = max([dt.date.fromisoformat(MERVAL_CAMBIO)] + [dt.date.fromisoformat(k) for k in nuevo])
+    intentos = 0
+    while d <= hoy and intentos < 30:
+        objetivo = min(d + dt.timedelta(days=12), hoy)
+        for atras in range(6):  # la página tiene que ser de un día hábil
+            try:
+                datos = _rava_merval(objetivo - dt.timedelta(days=atras))
+                if datos:
+                    nuevo.update({k: v for k, v in datos.items() if k >= MERVAL_CAMBIO})
+                    break
+            except Exception:
+                continue
+        d = objetivo + dt.timedelta(days=1)
+        intentos += 1
+    try:
+        with open(MERVAL_ARCHIVO, "w", encoding="utf-8") as f:
+            json.dump(dict(sorted(nuevo.items())), f, indent=0)
+    except Exception:
+        pass
+    serie = {}
+    for fila in get_json(f"https://mercados.ambito.com//indice/.merv/historico-general/2005-08-01/{MERVAL_CAMBIO}")[1:]:
+        d_, m_, y_ = fila[0].split("-")
+        k = f"{y_}-{m_}-{d_}"
+        if k <= MERVAL_CAMBIO:
+            serie[k] = float(fila[2].replace(".", "").replace(",", "."))
+    for k, v in nuevo.items():  # MSCI Merval llevado a puntos del S&P Merval
+        if k > MERVAL_CAMBIO:
+            serie[k] = v * MERVAL_FACTOR
+    return dict(sorted(serie.items())), nuevo
+
+
+def merval_mensual(diario):
+    """Cierre de cada mes (puntos del S&P Merval), desde dic-2001."""
+    m = dict(MERVAL_2001_2005)
+    for k, v in diario.items():
+        m[k[:7]] = v  # queda el último día de cada mes
+    return dict(sorted(m.items()))
+
+
+MERVAL_CACHE = {}
+
+
+def merval_datos(hoy):
+    if "d" not in MERVAL_CACHE:
+        MERVAL_CACHE["d"], MERVAL_CACHE["n"] = merval_diario(hoy)
+    return MERVAL_CACHE["d"], MERVAL_CACHE["n"]
+
+
 def dia_habil_siguiente(d):
     d += dt.timedelta(days=1)
     while d.weekday() >= 5:
@@ -1174,7 +1256,8 @@ def precio_activo(a, bonos_cache, ccl):
     if f == "yahoo":
         return float(get_json(YAHOO_URL.format(t=urllib.parse.quote(sim)))["chart"]["result"][0]["meta"]["regularMarketPrice"])
     if f == "merval_usd":
-        merv = float(get_json(YAHOO_URL.format(t="%5EMERV"))["chart"]["result"][0]["meta"]["regularMarketPrice"])
+        _d, nuevo = merval_datos(dt.date.today())
+        merv = nuevo[max(nuevo)] if nuevo else _d[max(_d)] / MERVAL_FACTOR  # MSCI Merval
         return merv / ccl * float(a.get("escala", 1)) if ccl else None
     return None
 
@@ -1832,11 +1915,7 @@ def main():
     try:
         ipc = ipc_empalmado()
         ult = max(ipc)
-        r = get_json(MERVAL_URL)["chart"]["result"][0]
-        mv = {}
-        for t, c in zip(r["timestamp"], r["indicators"]["quote"][0]["close"]):
-            if c:
-                mv[dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%Y-%m")] = c
+        mv = merval_mensual(merval_datos(hoy)[0])
         # meses sin IPC publicado todavía: se usa el último disponible
         serie_m = [[m, round(v * ipc[ult] / ipc.get(m, ipc[ult]))] for m, v in sorted(mv.items()) if m >= "2001-12"]
         historicos["merval"] = {"base": ult, "serie": serie_m}
@@ -2469,6 +2548,36 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
 .mkt td:nth-child(2),.esc td:nth-child(2n){color:#fff;font-weight:600}
 .duo{gap:0}
 @media (max-width:700px){.hdr-r{margin-left:0}header .sub{display:none}}
+
+/* ===== Mejoras visuales para pantallas de PC ===== */
+.panel{border-radius:6px!important;box-shadow:0 1px 0 #1b1b1b,0 6px 18px rgba(0,0,0,.45);background:linear-gradient(180deg,#0b0b0b,#070707)!important}
+.panel .phead{border-radius:6px 6px 0 0;padding:7px 12px;background:linear-gradient(90deg,#1f1700,#120d00)}
+.phead h2{font-size:12.5px!important}
+.panel>p.n{color:#8a8a8a;line-height:1.5}
+.gobs>div{border-radius:4px}
+.ind>div,.dol>div{border-radius:4px!important}
+.seg button{border-radius:3px}
+canvas{image-rendering:auto}
+@media (min-width:1150px){
+  .wrap{max-width:1760px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:16px;align-items:start}
+  .wrap>*{grid-column:1/-1}
+  .wrap>section.panel{grid-column:auto}
+  .wrap>section.panel.ancho,.wrap>section.panel.solo{grid-column:1/-1}
+  .duo{grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:14px!important}
+}
+/* notas plegables, paneles con la misma altura por fila y detalles finos */
+details.nota{margin:6px 10px 0;border-top:1px dashed #262626;padding-top:4px}
+details.nota summary{cursor:pointer;color:#8a8a8a;font-size:11px;letter-spacing:.04em;list-style:none;user-select:none;padding:2px 0}
+details.nota summary::-webkit-details-marker{display:none}
+details.nota summary::before{content:"ⓘ ";color:var(--amb)}
+details.nota[open] summary{color:var(--amb)}
+details.nota>p{margin:4px 0 2px!important;padding:0!important;color:#9a9a9a!important}
+.panel{transition:border-color .2s,box-shadow .2s}
+.panel:hover{border-color:#3a2c00!important;box-shadow:0 1px 0 #1b1b1b,0 8px 22px rgba(0,0,0,.55),0 0 0 1px rgba(255,176,0,.08)}
+.gobs .pc{font-size:22px}
+@media (min-width:1150px){.wrap{align-items:stretch}.wrap>section.panel{display:flex;flex-direction:column}.wrap>section.panel>details.nota{margin-top:auto}
+  .wrap>section.panel:not(.ancho):not(.solo)>.chartbox{flex:1 1 auto;height:auto!important;min-height:300px;max-height:none!important}}
+@media (min-width:1150px) and (max-width:1400px){.wrap>section.panel:not(.ancho) .gobs{grid-template-columns:repeat(2,minmax(0,1fr))!important}}
 </style>
 </head>
 <body>
@@ -2873,6 +2982,49 @@ select.nm{background:#000!important;color:var(--amb)!important;border:1px solid 
 </div>
 <script>
 const D = /*__DATOS__*/null;
+// Diseño en PC: paneles de a dos columnas; los que tienen tablas, calculadoras o mucho detalle van a todo el ancho
+(function(){
+  const ANCHOS=["psemp","preal","pitc","pjub","psm","psec","pcom2","pvon","pmerc","prend","ptsem","psem","pbm","pene","prel","ppob","pbma","pfis","pbrres"];
+  document.querySelectorAll(".wrap>section.panel").forEach((p,i)=>{
+    if(ANCHOS.includes(p.id)||p.querySelector("table,.calc,.duo")||i===0) p.classList.add("ancho");
+  });
+  // si un gráfico chico queda solo en su fila (por la pestaña elegida), ocupa todo el ancho en vez de dejar un hueco
+  function acomodar(){
+    let racha=[];
+    const cerrar=()=>{ if(racha.length%2===1) racha[racha.length-1].classList.add("solo"); racha=[]; };
+    document.querySelectorAll(".wrap>section.panel").forEach(p=>{
+      p.classList.remove("solo");
+      if(p.offsetParent===null) return;          // oculto en esta pestaña
+      if(p.classList.contains("ancho")){ cerrar(); return; }
+      racha.push(p);
+    });
+    cerrar();
+  }
+  window.acomodarPaneles=acomodar;
+  // las notas de fuentes y metodología quedan plegadas para que los gráficos respiren
+  document.querySelectorAll(".wrap>section.panel").forEach(p=>{
+    p.querySelectorAll(":scope>p.n, :scope>p[id$='n']").forEach(n=>{
+      if(n.closest("details")) return;
+      const d=document.createElement("details"); d.className="nota";
+      const sm=document.createElement("summary"); sm.textContent="Fuente y metodología"; d.appendChild(sm);
+      n.parentNode.insertBefore(d,n); d.appendChild(n);
+    });
+  });
+  document.addEventListener("click",e=>{ if(e.target.closest("#fk button")) setTimeout(acomodar,0); });
+  window.addEventListener("hashchange",()=>setTimeout(acomodar,0));
+  setTimeout(acomodar,0); window.addEventListener("load",acomodar);
+  if(window.Chart){
+    Chart.defaults.font.family='"IBM Plex Mono",Consolas,monospace';
+    Chart.defaults.plugins.tooltip.backgroundColor="rgba(10,10,10,.95)";
+    Chart.defaults.plugins.tooltip.borderColor="#ffb000"; Chart.defaults.plugins.tooltip.borderWidth=1;
+    Chart.defaults.plugins.tooltip.padding=10; Chart.defaults.plugins.tooltip.titleColor="#ffb000";
+    Chart.defaults.plugins.tooltip.cornerRadius=3;
+    Chart.defaults.plugins.legend.labels.usePointStyle=true; Chart.defaults.plugins.legend.labels.pointStyleWidth=14;
+    Chart.defaults.elements.point.hoverRadius=5; Chart.defaults.elements.line.borderCapStyle="round"; Chart.defaults.elements.line.borderJoinStyle="round";
+    Chart.defaults.elements.bar.borderRadius=2;
+    Chart.defaults.scale.grid.color="rgba(255,255,255,.06)";
+  }
+})();
 const MESES=["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
 const fmt=(v,d=0)=>v.toLocaleString("es-AR",{minimumFractionDigits:d,maximumFractionDigits:d});
 const ym=f=>f.slice(0,7), dmy=f=>f.split("-").reverse().join("/");
@@ -3188,7 +3340,7 @@ function historicos(){
         scales:{x:{grid:{display:false},ticks:{color:m,font,maxTicksLimit:14,maxRotation:0}},y:{grid:{color:g},ticks:{color:m,font,callback:x=>fmt(x/1e6,1)+" M"}}}},plugins:[lineasVert]});
     const u=v[v.length-1], mx=Math.max(...v), mxk=L[v.indexOf(mx)];
     document.getElementById("mervt").textContent=`Merval ajustado por inflación desde diciembre 2001 (en puntos de ${mesCorto(M.base)})`;
-    document.getElementById("nmerv").textContent=`Hoy ${fmt(u,0)} puntos reales, ${fmt((u/med-1)*100,0)} % ${u>=med?"arriba":"abajo"} de la media (${fmt(med,0)}) y ${fmt((u/mx-1)*100,0)} % contra el máximo de ${mesCorto(mxk)}. Inflación: INDEC hasta 2006 y desde 2017; IPC de San Luis entre 2007 y 2016, cuando el INDEC estuvo intervenido. Fuentes: Yahoo Finance (S&P Merval), INDEC, datos.gob.ar.`;
+    document.getElementById("nmerv").textContent=`Hoy ${fmt(u,0)} puntos reales, ${fmt((u/med-1)*100,0)} % ${u>=med?"arriba":"abajo"} de la media (${fmt(med,0)}) y ${fmt((u/mx-1)*100,0)} % contra el máximo de ${mesCorto(mxk)}. Inflación: INDEC hasta 2006 y desde 2017; IPC de San Luis entre 2007 y 2016, cuando el INDEC estuvo intervenido. El 16/10/2026 el S&P Merval fue reemplazado por el MSCI Merval (base 100.000); desde entonces se empalma multiplicando por 28,43 para mantener la serie. Fuentes: Ámbito y Rava (Merval), INDEC, datos.gob.ar.`;
   } else document.getElementById("pmerv").style.display="none";
 }
 historicos();
@@ -4115,7 +4267,7 @@ function celda(v){
   h+=`<tr class="prob"><td>Prob implícita</td>${A.map(a=>{if(a.precio==null) return `<td>–</td><td></td>`;
     const pr=(a.p0-a.precio)/(a.p0-a.p100)*100; return `<td class="pv">${fmt(pr,1)} %</td><td></td>`;}).join("")}</tr></tbody>`;
   t.innerHTML=h;
-  document.getElementById("nesc").textContent="Precio de cada escenario interpolado entre tus precios objetivo con 0 % y 100 % de probabilidad (config.json). Up/Down: ganancia o pérdida desde el precio de hoy. Bonos: precio limpio (sin intereses corridos) en dólar cable/CCL (data912). Merval: S&P Merval dividido por el CCL, multiplicado por la escala de config.json para llevarlo a la unidad de tus objetivos (82 y 20).";
+  document.getElementById("nesc").textContent="Precio de cada escenario interpolado entre tus precios objetivo con 0 % y 100 % de probabilidad (config.json). Up/Down: ganancia o pérdida desde el precio de hoy. Bonos: precio limpio (sin intereses corridos) en dólar cable/CCL (data912). Merval: MSCI Merval (el índice que reemplazó al S&P Merval el 16/10/2026) dividido por el CCL.";
 })();
 
 // Reservas netas
