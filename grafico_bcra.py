@@ -515,6 +515,54 @@ def personas_humanas(hoy):
     return sorted(datos.items())
 
 
+# ---------- Destino de las compras de dólares: quedan en bancos o se van (estimación del BCRA) ----------
+AHORRO_ARCHIVO = os.path.join(BASE, "ahorro_destino.json")
+AHORRO_SEED = {  # USD millones: [quedaron depositados en bancos locales, incrementaron activos externos]
+    "2026-02": [600, 200], "2026-03": [600, 100], "2026-04": [1200, 400], "2026-05": [700, 300], "2026-06": [800, 500],
+    "2026-07": [1000, 1000], "2026-08": [1100, 700], "2026-09": [800, 800], "2026-10": [500, 1100]}
+
+
+def ahorro_destino(hoy):
+    """El informe cambiario mensual del BCRA estima qué parte de las compras de billetes y divisas quedó depositada
+    en bancos locales y qué parte se fue como activos externos. Lee los informes nuevos y guarda los valores."""
+    import re as _re
+    try:
+        with open(AHORRO_ARCHIVO, encoding="utf-8") as f:
+            datos = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        datos = {}
+    for k, v in AHORRO_SEED.items():
+        datos.setdefault(k, v)
+    k, tope, nuevos = max(datos), _mes_ant(hoy.strftime("%Y-%m")), False
+    while k < tope:
+        k = _mes_sig(k)
+        try:
+            pdf = get_bytes(PH_URL.format(ym=k))
+            if not pdf.startswith(b"%PDF"):
+                break
+            import io
+            from pypdf import PdfReader
+        except ImportError:
+            break
+        except Exception:
+            break  # todavía no se publicó
+        t = " ".join((pg.extract_text() or "") for pg in PdfReader(io.BytesIO(pdf)).pages[:6])
+        t = _re.sub(r"(\d) (\d)", r"\1\2", _re.sub(r"\s+", " ", t)).replace("depositad os", "depositados")
+        num = lambda m: float(next(g for g in m.groups() if g).replace(".", "")) if m else None
+        dep = num(_re.search(r"USD ([\d\.]+) millones(?: de las compras de moneda extranjera)? quedaron depositad", t))
+        ext = num(_re.search(r"USD ([\d\.]+) millones (?:que finalmente |restantes )?(?:incrementaron|aumentaron)[^.]{0,30}activos externos"
+                             r"|activos externos[^.]{0,140}?rondaron los USD ([\d\.]+) millones", t))
+        if dep is None or ext is None:
+            aviso(f"no se encontró la estimación de depósitos y activos externos en el informe cambiario de {k}")
+            break
+        datos[k] = [dep, ext]
+        nuevos = True
+    if nuevos:
+        with open(AHORRO_ARCHIVO, "w", encoding="utf-8") as f:
+            json.dump(dict(sorted(datos.items())), f, indent=1)
+    return sorted(datos.items())
+
+
 # ---------- Patentamientos (inscripciones iniciales, DNRPA) ----------
 DNRPA_PAQUETES = {"autos": "estadistica-de-tramites-de-automotores", "motos": "estadistica-de-tramites-de-motovehiculos"}
 
@@ -2226,6 +2274,10 @@ def main():
     except Exception as e:
         aviso(f"no se pudo calcular el ajuste de precios relativos ({e})")
     try:
+        historicos["ahorro"] = ahorro_destino(hoy)
+    except Exception as e:
+        aviso(f"no se pudo leer el destino de las compras de dólares ({e})")
+    try:
         historicos["personas"] = personas_humanas(hoy)
     except Exception as e:
         aviso(f"no se pudo armar la serie de compras de personas humanas ({e})")
@@ -2812,6 +2864,13 @@ details.nota>p{margin:4px 0 2px!important;padding:0!important;color:#9a9a9a!impo
     <div class="gobs" id="gobs"></div>
     <div class="chartbox" style="height:420px"><canvas id="c14" aria-label="Reservas internacionales diarias del BCRA desde diciembre de 2007, coloreadas por gobierno"></canvas></div>
     <p class="n" id="ngob" style="margin:8px 0 0"></p>
+  </section>
+
+  <section data-sec="fx compras" class="panel" id="pahorro">
+    <div class="phead"><h2 id="pahorrot">Compras de dólares para ahorro: ¿quedan en los bancos o se van?</h2></div>
+    <div class="gobs" id="pahorroc"></div>
+    <div class="chartbox" style="height:340px"><canvas id="c47" aria-label="Destino de las compras de dólares para ahorro y dólar oficial ajustado por inflación"></canvas></div>
+    <p class="n" id="pahorron" style="margin:8px 0 0"></p>
   </section>
 
   <section data-sec="fx compras" class="panel" id="pph">
@@ -3925,6 +3984,32 @@ function ventasComercio(){
 }
 setTimeout(ventasComercio,0);
 
+// Destino de las compras de dólares para ahorro
+function ahorroDestino(){
+  const A=(D.historicos||{}).ahorro, panel=document.getElementById("pahorro");
+  if(!A||!A.length){panel.style.display="none";return;}
+  const m=css("--muted"), g=css("--line"), font={family:"IBM Plex Mono",size:11};
+  const L=A.map(x=>x[0]), dep=A.map(x=>x[1][0]), ext=A.map(x=>x[1][1]);
+  const T=Object.fromEntries((((D.historicos||{}).tcr||{}).serie||[]).map(x=>[x[0],x[1]]));
+  const tot=dep.map((d,i)=>d+ext[i]), iU=L.length-1;
+  nuevo("c47",{data:{labels:L.map(mesCorto),datasets:[
+      {type:"bar",label:"Quedan depositados en bancos locales",data:dep,backgroundColor:"#2f6bff",stack:"a",yAxisID:"y",order:2},
+      {type:"bar",label:"Se van (activos externos: cajas de seguridad, colchón, exterior)",data:ext,backgroundColor:"#5fd3e6",stack:"a",yAxisID:"y",order:2},
+      {type:"line",label:"Dólar oficial ajustado por inflación (der.)",data:L.map(k=>T[k]??null),borderColor:"#ffb000",backgroundColor:"#ffb000",borderWidth:3,pointRadius:3,tension:.25,yAxisID:"y2",order:1}]},
+    options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
+      plugins:{legend:{labels:{color:m,boxWidth:12,font}},etiquetas:{lista:tot.map((v,i)=>[1,i,fmt(v,0),"#dddddd"]),simple:true},
+        tooltip:{callbacks:{label:it=>it.datasetIndex===2?`Dólar real: $ ${fmt(it.raw,0)}`:`${it.dataset.label.split(" (")[0]}: USD ${fmt(it.raw,0)} M`}}},
+      scales:{x:{stacked:true,grid:{display:false},ticks:{color:m,font}},y:{stacked:true,beginAtZero:true,grid:{color:g},ticks:{color:m,font,callback:v=>fmt(v,0)},title:{display:true,text:"USD millones",color:m,font}},
+        y2:{position:"right",grid:{display:false},ticks:{color:"#ffb000",font,callback:v=>"$ "+fmt(v,0)}}}},plugins:[etiquetas]});
+  const sd=dep.reduce((a,b)=>a+b,0), se=ext.reduce((a,b)=>a+b,0);
+  document.getElementById("pahorroc").innerHTML=
+    `<div style="--c:#5b8cff"><div class="nm">QUEDARON EN BANCOS · ${mesCorto(L[iU])}</div><div class="pc">USD ${fmt(dep[iU],0)} M</div><div class="rg">${fmt(dep[iU]/tot[iU]*100,0)} % de lo ahorrado</div></div>`+
+    `<div style="--c:#5fd3e6"><div class="nm">SE FUERON · ${mesCorto(L[iU])}</div><div class="pc">USD ${fmt(ext[iU],0)} M</div><div class="rg">${fmt(ext[iU]/tot[iU]*100,0)} % de lo ahorrado</div></div>`+
+    `<div style="--c:#777"><div class="nm">ACUMULADO DESDE ${mesCorto(L[0]).toUpperCase()}</div><div class="pc">USD ${fmt(sd+se,0)} M</div><div class="rg">${fmt(sd/(sd+se)*100,0)} % quedó en bancos</div></div>`;
+  document.getElementById("pahorron").textContent=`Estimación del BCRA en su informe mensual de mercado de cambios: de las compras de billetes y divisas sin fines específicos, qué parte quedó depositada en bancos locales y qué parte incrementó los activos externos (dólares fuera del sistema financiero local). No incluye lo usado para pagar tarjetas, turismo e importaciones. El BCRA publica esta apertura desde febrero de 2026; el tablero lee cada informe nuevo (sale a fin del mes siguiente). La línea es el dólar oficial en pesos de hoy, ajustado por el tipo de cambio real (ITCRM): cuanto más barato el dólar, más incentivo a comprar. Fuente: BCRA.`;
+}
+setTimeout(ahorroDestino,0);
+
 // Oro del BCRA
 let c26;
 function oro(){
@@ -4092,7 +4177,7 @@ function servicios(){
   document.getElementById("nserv").textContent=`Último: USD ${fmt(u[i],0)} M en los 12 meses a ${mesCorto(u[0])}${a?`, ${fmt((u[i]/a[i]-1)*100,0)} % más que un año antes`:""}. Son los dólares que ingresan por el mercado de cambios por cada servicio (balance cambiario del BCRA), por eso pueden diferir de las estadísticas del INDEC. Fuente: BCRA vía datos.gob.ar.`;
 }
 document.querySelectorAll("[data-sv]").forEach(b=>b.onclick=()=>{svVista=b.dataset.sv;document.querySelectorAll("[data-sv]").forEach(x=>x.setAttribute("aria-pressed",x===b));servicios();});
-setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();jubilacion();panelesExtra();sectorEmpleo();ventasComercio();salarioMandatos();energia();relativos();},0);
+setTimeout(()=>{mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();jubilacion();panelesExtra();sectorEmpleo();ventasComercio();ahorroDestino();salarioMandatos();energia();relativos();},0);
 
 // Semáforo de actividad
 function semaforoTabla(){
@@ -4345,7 +4430,7 @@ function render(){
 
 }
 document.querySelectorAll("[data-mode]").forEach(b=>b.onclick=()=>{mode=b.dataset.mode;document.querySelectorAll("[data-mode]").forEach(x=>x.setAttribute("aria-pressed",x===b));render();});
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();jubilacion();panelesExtra();sectorEmpleo();ventasComercio();salarioMandatos();energia();relativos();inflacion();});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();jubilacion();panelesExtra();sectorEmpleo();ventasComercio();ahorroDestino();salarioMandatos();energia();relativos();inflacion();});
 render();
 function avisos(){const A=D.avisos||[], el=document.getElementById("avisos"); el.innerHTML=A.length?`<section class="panel" style="border-color:var(--bad)"><div class="k" style="color:var(--bad)">Avisos de la última actualización</div><ul class="n" style="margin:6px 0 0;padding-left:18px">${A.map(a=>`<li>${a.replace(/</g,"&lt;")}</li>`).join("")}</ul></section>`:"";}
 avisos();
@@ -4378,7 +4463,7 @@ document.addEventListener("keydown",e=>{ if(e.target.tagName==="SELECT"||e.targe
 })();
 (function reloj(){const el=document.getElementById("clk"); const f=()=>{el.textContent=new Date().toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})+" ART";}; f(); setInterval(f,30000);})();
 // Redibuja cuando termina de cargar la tipografía, para que las etiquetas midan bien
-if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();jubilacion();panelesExtra();sectorEmpleo();ventasComercio();salarioMandatos();energia();relativos();inflacion();});
+if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{render();bandas();alimentos();cclmep();meses12();historicos();personas();reservasGob();canasta();pobreza();mepBrasil();salarios();servicios();patentes();realBrasil();brasilRes();reeleccion();emae();comercio();oro();bigmac();mora();itcrm();rendimientos();bmaReal();jubilacion();panelesExtra();sectorEmpleo();ventasComercio();ahorroDestino();salarioMandatos();energia();relativos();inflacion();});
 // Recarga la página cada 10 minutos para tomar la última versión generada
 // Recarga salteando la caché del navegador (agrega ?t=… al link)
 const recargar=()=>location.replace(location.pathname+"?t="+Date.now()+location.hash);
