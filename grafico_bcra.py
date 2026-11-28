@@ -3993,12 +3993,12 @@ function ahorroDestino(){
   const T=Object.fromEntries((((D.historicos||{}).tcr||{}).serie||[]).map(x=>[x[0],x[1]]));
   const tot=dep.map((d,i)=>d+ext[i]), iU=L.length-1;
   nuevo("c47",{data:{labels:L.map(mesCorto),datasets:[
-      {type:"bar",label:"Quedan depositados en bancos locales",data:dep,backgroundColor:"#2f6bff",stack:"a",yAxisID:"y",order:2},
-      {type:"bar",label:"Se van (activos externos: cajas de seguridad, colchón, exterior)",data:ext,backgroundColor:"#5fd3e6",stack:"a",yAxisID:"y",order:2},
-      {type:"line",label:"Dólar oficial ajustado por inflación (der.)",data:L.map(k=>T[k]??null),borderColor:"#ffb000",backgroundColor:"#ffb000",borderWidth:3,pointRadius:3,tension:.25,yAxisID:"y2",order:1}]},
+      {type:"bar",label:"Quedan en bancos",data:dep,backgroundColor:"#2f6bff",stack:"a",yAxisID:"y",order:2},
+      {type:"bar",label:"Se van (activos externos)",data:ext,backgroundColor:"#5fd3e6",stack:"a",yAxisID:"y",order:2},
+      {type:"line",label:"Dólar real (der.)",data:L.map(k=>T[k]??null),borderColor:"#ffb000",backgroundColor:"#ffb000",borderWidth:3,pointRadius:3,tension:.25,yAxisID:"y2",order:1}]},
     options:{responsive:true,maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
       plugins:{legend:{labels:{color:m,boxWidth:12,font}},etiquetas:{lista:tot.map((v,i)=>[1,i,fmt(v,0),"#dddddd"]),simple:true},
-        tooltip:{callbacks:{label:it=>it.datasetIndex===2?`Dólar real: $ ${fmt(it.raw,0)}`:`${it.dataset.label.split(" (")[0]}: USD ${fmt(it.raw,0)} M`}}},
+        tooltip:{callbacks:{label:it=>it.datasetIndex===2?`Dólar oficial ajustado por inflación: $ ${fmt(it.raw,0)}`:`${it.dataset.label}: USD ${fmt(it.raw,0)} M`}}},
       scales:{x:{stacked:true,grid:{display:false},ticks:{color:m,font}},y:{stacked:true,beginAtZero:true,grid:{color:g},ticks:{color:m,font,callback:v=>fmt(v,0)},title:{display:true,text:"USD millones",color:m,font}},
         y2:{position:"right",grid:{display:false},ticks:{color:"#ffb000",font,callback:v=>"$ "+fmt(v,0)}}}},plugins:[etiquetas]});
   const sd=dep.reduce((a,b)=>a+b,0), se=ext.reduce((a,b)=>a+b,0);
@@ -4006,7 +4006,7 @@ function ahorroDestino(){
     `<div style="--c:#5b8cff"><div class="nm">QUEDARON EN BANCOS · ${mesCorto(L[iU])}</div><div class="pc">USD ${fmt(dep[iU],0)} M</div><div class="rg">${fmt(dep[iU]/tot[iU]*100,0)} % de lo ahorrado</div></div>`+
     `<div style="--c:#5fd3e6"><div class="nm">SE FUERON · ${mesCorto(L[iU])}</div><div class="pc">USD ${fmt(ext[iU],0)} M</div><div class="rg">${fmt(ext[iU]/tot[iU]*100,0)} % de lo ahorrado</div></div>`+
     `<div style="--c:#777"><div class="nm">ACUMULADO DESDE ${mesCorto(L[0]).toUpperCase()}</div><div class="pc">USD ${fmt(sd+se,0)} M</div><div class="rg">${fmt(sd/(sd+se)*100,0)} % quedó en bancos</div></div>`;
-  document.getElementById("pahorron").textContent=`Estimación del BCRA en su informe mensual de mercado de cambios: de las compras de billetes y divisas sin fines específicos, qué parte quedó depositada en bancos locales y qué parte incrementó los activos externos (dólares fuera del sistema financiero local). No incluye lo usado para pagar tarjetas, turismo e importaciones. El BCRA publica esta apertura desde febrero de 2026; el tablero lee cada informe nuevo (sale a fin del mes siguiente). La línea es el dólar oficial en pesos de hoy, ajustado por el tipo de cambio real (ITCRM): cuanto más barato el dólar, más incentivo a comprar. Fuente: BCRA.`;
+  document.getElementById("pahorron").textContent=`Estimación del BCRA en su informe mensual de mercado de cambios: de las compras de billetes y divisas sin fines específicos, qué parte quedó depositada en bancos locales y qué parte incrementó los activos externos (dólares fuera del sistema financiero local). No incluye lo usado para pagar tarjetas, turismo e importaciones, por eso la suma de las barras es menor que las compras netas de personas humanas del gráfico de abajo (que además incluyen pagos de servicios); el BCRA además redondea sus estimaciones. Activos externos: dólares fuera del sistema financiero local (cajas de seguridad, en casa o en el exterior). El BCRA publica esta apertura desde febrero de 2026; el tablero lee cada informe nuevo (sale a fin del mes siguiente). La línea es el dólar oficial en pesos de hoy, ajustado por el tipo de cambio real (ITCRM): cuanto más barato el dólar, más incentivo a comprar. Fuente: BCRA.`;
 }
 setTimeout(ahorroDestino,0);
 
